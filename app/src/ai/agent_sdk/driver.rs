@@ -1149,6 +1149,7 @@ impl AgentDriver {
                             None,
                             None,
                             None,
+                            None,
                         )
                         .await
                         .context("Failed to update agent task state to InProgress")
@@ -1885,6 +1886,7 @@ impl AgentDriver {
                     None,
                     None,
                     Some(TaskStatusUpdate::message(message)),
+                    None,
                     None,
                 )
                 .await
@@ -3028,7 +3030,7 @@ impl AgentDriver {
         // refreshes; letting it suppress this would leave the previous window's deadline on the
         // run, which reads as already-expired and hides that the session is reachable.
         self.last_published_debug_deadline = None;
-        self.publish_debug_window_deadline(window, ctx);
+        self.publish_debug_window_deadline(window, None, ctx);
 
         if self.debug_window_refresh_installed {
             return;
@@ -3043,7 +3045,7 @@ impl AgentDriver {
                 log::debug!(
                     "Ambient agent idle lifecycle: event=idle_timeout_refreshed trigger=viewer_input"
                 );
-                me.publish_debug_window_deadline(window, ctx);
+                me.publish_debug_window_deadline(window, None, ctx);
             }
         });
     }
@@ -3065,7 +3067,7 @@ impl AgentDriver {
     ) {
         controller.refresh_idle((), window);
         self.last_published_debug_deadline = None;
-        self.publish_debug_window_deadline(window, ctx);
+        self.publish_debug_window_deadline(window, None, ctx);
 
         let terminal_driver = self.terminal_driver.clone();
         let terminal_surface_id = self.terminal_driver.as_ref(ctx).terminal_view().id();
@@ -3078,7 +3080,7 @@ impl AgentDriver {
                 log::debug!(
                     "Ambient agent idle lifecycle: event=idle_timeout_refreshed trigger=viewer_input"
                 );
-                me.publish_debug_window_deadline(window, ctx);
+                me.publish_debug_window_deadline(window, None, ctx);
             }
         });
 
@@ -3107,7 +3109,7 @@ impl AgentDriver {
                         "Ambient agent idle lifecycle: event=debug_turn_accepted conversation_id={conversation_id:?}"
                     );
                     me.last_published_debug_deadline = None;
-                    me.publish_debug_window_deadline(window, ctx);
+                    me.publish_debug_window_deadline(window, Some(true), ctx);
                 }
             } else if (new_status.is_done() || new_status.is_blocked())
                 && controller.finish_turn(*conversation_id, (), window)
@@ -3116,39 +3118,60 @@ impl AgentDriver {
                     "Ambient agent idle lifecycle: event=debug_turn_finished conversation_id={conversation_id:?}"
                 );
                 me.last_published_debug_deadline = None;
-                me.publish_debug_window_deadline(window, ctx);
+                me.publish_debug_window_deadline(window, Some(false), ctx);
             }
             // WaitingForEvents / TransientError are quiescent-but-not-terminal: the turn stays
             // pinned without a fresh accept or finish transition.
         });
     }
 
-    /// Publishes the debug window's current deadline for display on run surfaces.
+    /// Publishes the debug window's current deadline for display on run surfaces, and
+    /// optionally the REMOTE-2661 `debug_agent_active` pin flag alongside it.
     ///
-    /// Throttled, since the window refreshes on keystroke-level events. The published value is
-    /// advisory and lags the real deadline conservatively; the agent process owns the timer.
-    fn publish_debug_window_deadline(&mut self, window: Duration, ctx: &mut ModelContext<Self>) {
+    /// The deadline publish is throttled, since the window refreshes on keystroke-level events;
+    /// the published value is advisory and lags the real deadline conservatively, since the
+    /// agent process owns the timer. `debug_agent_active`, when `Some`, is never throttled: a
+    /// pin/unpin transition must be reflected immediately regardless of how recently the
+    /// deadline was last published, since it's a discrete state change rather than a sliding
+    /// value.
+    fn publish_debug_window_deadline(
+        &mut self,
+        window: Duration,
+        debug_agent_active: Option<bool>,
+        ctx: &mut ModelContext<Self>,
+    ) {
         const MIN_PUBLISH_INTERVAL: Duration = Duration::from_secs(30);
 
         let Some(task_id) = self.task_id else {
             return;
         };
         let now = SystemTime::now();
-        if let Some(last) = self.last_published_debug_deadline
-            && now
-                .duration_since(last)
+        let deadline_throttled = self.last_published_debug_deadline.is_some_and(|last| {
+            now.duration_since(last)
                 .is_ok_and(|elapsed| elapsed < MIN_PUBLISH_INTERVAL)
-        {
+        });
+        if deadline_throttled && debug_agent_active.is_none() {
             return;
         }
         self.last_published_debug_deadline = Some(now);
 
+        // A throttled deadline republish still needs a value to send; reuse the current window
+        // rather than omitting `session_debug_until`, which would otherwise pair a
+        // `debug_agent_active`-only update with no deadline at all.
         let deadline = Utc::now() + chrono::Duration::from_std(window).unwrap_or_default();
         let ai_client = ServerApiProvider::as_ref(ctx).get_ai_client();
         ctx.spawn(
             async move {
                 ai_client
-                    .update_agent_task(task_id, None, None, None, None, Some(deadline))
+                    .update_agent_task(
+                        task_id,
+                        None,
+                        None,
+                        None,
+                        None,
+                        Some(deadline),
+                        debug_agent_active,
+                    )
                     .await
             },
             move |_me, result, _ctx| {
@@ -3190,6 +3213,7 @@ impl AgentDriver {
                 None,
                 None,
                 Some(status),
+                None,
                 None,
             )
             .await
@@ -4375,6 +4399,7 @@ impl AgentDriver {
                                         Some(session_id),
                                         None,
                                         None,
+                                        None,
                                         None
                                     )
                                     .await
@@ -4669,7 +4694,15 @@ pub(super) async fn report_driver_error(
 ) {
     let (state, status_update) = error_classification::classify_driver_error(err);
     if let Err(e) = server_api
-        .update_agent_task(task_id, Some(state), None, None, Some(status_update), None)
+        .update_agent_task(
+            task_id,
+            Some(state),
+            None,
+            None,
+            Some(status_update),
+            None,
+            None,
+        )
         .await
     {
         report_error!(

@@ -1228,6 +1228,11 @@ pub trait AIClient: 'static + Send + Sync {
     /// `session_debug_until` is the deadline of an open post-failure debug window. It is
     /// deliberately separate from `status_message` so a refresh can move the deadline without
     /// rewriting the failure text the run reported.
+    ///
+    /// `debug_agent_active` is whether a REMOTE-2661 debug turn is actively pinning that window.
+    /// Also deliberately separate from `status_message`/`session_debug_until` for the same
+    /// reason: a pin/unpin update must not overwrite the failure text or move the deadline.
+    #[allow(clippy::too_many_arguments)]
     async fn update_agent_task(
         &self,
         task_id: AmbientAgentTaskId,
@@ -1236,6 +1241,7 @@ pub trait AIClient: 'static + Send + Sync {
         conversation_id: Option<String>,
         status_message: Option<TaskStatusUpdate>,
         session_debug_until: Option<DateTime<Utc>>,
+        debug_agent_active: Option<bool>,
     ) -> anyhow::Result<(), anyhow::Error>;
 
     async fn spawn_agent(
@@ -2133,6 +2139,7 @@ impl AIClient for ServerApi {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     #[tracing::instrument(skip_all, err, fields(
         tags.cloud_agent = true,
         ?task_state,
@@ -2148,6 +2155,7 @@ impl AIClient for ServerApi {
         conversation_id: Option<String>,
         status_message: Option<TaskStatusUpdate>,
         session_debug_until: Option<DateTime<Utc>>,
+        debug_agent_active: Option<bool>,
     ) -> anyhow::Result<(), anyhow::Error> {
         let variables = UpdateAgentTaskVariables {
             input: UpdateAgentTaskInput {
@@ -2160,6 +2168,7 @@ impl AIClient for ServerApi {
                     error_code: update.error_code,
                 }),
                 session_debug_until: session_debug_until.map(Into::into),
+                debug_agent_active,
             },
             request_context: get_request_context(),
         };

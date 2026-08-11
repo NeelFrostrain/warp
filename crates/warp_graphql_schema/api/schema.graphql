@@ -4155,6 +4155,14 @@ input UpdateAgentTaskInput {
   conversationId: ID
 
   """
+  True while a REMOTE-2661 debug turn is actively pinning the post-failure debug window's idle
+  timer; false once the turn ends and the timer re-arms. Display-only, and deliberately separate
+  from statusMessage and sessionDebugUntil for the same reason: a pin/unpin update must not
+  overwrite the failure text or move the deadline.
+  """
+  debugAgentActive: Boolean
+
+  """
   When a failed run's shared session stops being held open for debugging.
   
   The agent process owns that window and reports this on arm and on each refresh, so the
