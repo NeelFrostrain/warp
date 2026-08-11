@@ -17,6 +17,7 @@ use super::{BlocklistAIController, RequestInput, SessionContext};
 use crate::ai::agent::conversation::{AIConversationId, ConversationStatus, TaskSyncMode};
 use crate::ai::agent::{AIAgentActionId, AIAgentAttachment, EntrypointType};
 use crate::ai::agent_conversations_model::AgentConversationsModel;
+use crate::ai::ambient_agents::AmbientAgentTaskId;
 use crate::ai::attachment_utils::{
     DownloadedAttachment, build_file_attachment_map, download_file, sanitize_filename,
 };
@@ -40,6 +41,20 @@ pub(super) struct SharedSessionState {
     current_response_initiator: Option<ParticipantId>,
     // The sharer's participant ID (set when session sharing starts)
     sharer_participant_id: Option<ParticipantId>,
+    /// Records, per ambient-agent task, the local conversation created for a no-token
+    /// REMOTE-2661 setup-failure debug bootstrap prompt. warp-server can redeliver that exact
+    /// prompt (same idempotency key) if an earlier delivery's acknowledgement was lost -- e.g.
+    /// on the warp-server <-> session-sharing-server hop -- so a redelivered retry must land in
+    /// the same conversation a participant is watching rather than cancel it and disappear into
+    /// an independent, invisible one.
+    ///
+    /// Self-invalidating by design, not by active cleanup: a lookup only reuses the recorded
+    /// conversation while it is still live and has not yet been assigned a server conversation
+    /// token (see `BlocklistAIController::reusable_setup_failure_debug_bootstrap_conversation`).
+    /// Once tokened, the bootstrap has durably succeeded and any further no-token submission for
+    /// the same task is a distinct request, not a retry of this one, so it must not be forced
+    /// onto the now-established conversation.
+    pending_setup_failure_debug_bootstraps: HashMap<AmbientAgentTaskId, AIConversationId>,
 }
 
 impl BlocklistAIController {
@@ -863,6 +878,58 @@ impl BlocklistAIController {
         });
     }
 
+    /// Returns the conversation from a prior delivery of this task's no-token setup-failure
+    /// debug bootstrap prompt, if a redelivered retry should reuse it (REMOTE-2661) instead of
+    /// starting an independent conversation.
+    ///
+    /// Self-invalidating: only returns a hit while the recorded conversation is both still live
+    /// and not yet assigned a server conversation token. Once tokened, the bootstrap has durably
+    /// succeeded, so a later no-token submission for the same task is a distinct request, not a
+    /// retry of this one, and must fall through to the normal "start fresh" path instead.
+    ///
+    /// Reuse is safe even while the recorded conversation's prior attempt is still actively
+    /// streaming: `BlocklistAIController::send_query` already cancels whatever is this terminal
+    /// surface's active conversation before sending any new query to it, which is the same
+    /// cancel-then-restart handling an ordinary "user sends a second message before the first
+    /// finishes" submission gets. Reuse only changes which conversation object a repeated
+    /// bootstrap prompt lands in -- never whether an in-flight attempt gets cancelled -- and
+    /// that decision is made synchronously on this app's single event loop, so there is no
+    /// window where a concurrent handler could observe or act on a half-cancelled conversation.
+    fn reusable_setup_failure_debug_bootstrap_conversation(
+        &self,
+        ctx: &AppContext,
+    ) -> Option<AIConversationId> {
+        let task_id = self.ambient_agent_task_id?;
+        let recorded_conversation_id = self
+            .shared_session_state
+            .pending_setup_failure_debug_bootstraps
+            .get(&task_id)
+            .copied();
+        let history = BlocklistAIHistoryModel::as_ref(ctx);
+        reusable_bootstrap_conversation(recorded_conversation_id, |conversation_id| {
+            history
+                .conversation(&conversation_id)
+                .map(|conversation| conversation.server_conversation_token().is_some())
+        })
+    }
+
+    /// Tags `conversation_id` as a setup-failure debug bootstrap (see
+    /// `tag_conversation_as_setup_failure_debug_bootstrap`) and records it so a redelivered
+    /// retry of this task's bootstrap prompt reuses it instead of starting a new one
+    /// (REMOTE-2661; see `reusable_setup_failure_debug_bootstrap_conversation`).
+    fn record_setup_failure_debug_bootstrap_conversation(
+        &mut self,
+        conversation_id: AIConversationId,
+        ctx: &mut ModelContext<Self>,
+    ) {
+        if let Some(task_id) = self.ambient_agent_task_id {
+            self.shared_session_state
+                .pending_setup_failure_debug_bootstraps
+                .insert(task_id, conversation_id);
+        }
+        self.tag_conversation_as_setup_failure_debug_bootstrap(conversation_id, ctx);
+    }
+
     /// Helper to send a shared-session query, used both for immediate sends
     /// (no file attachments) and deferred sends (after file downloads complete).
     fn send_shared_session_query(
@@ -899,6 +966,44 @@ impl BlocklistAIController {
             let bootstraps_setup_failure_debug =
                 self.is_open_for_setup_failure_debug_bootstrap(ctx);
 
+            // REMOTE-2661: warp-server can redeliver this exact bootstrap prompt (same
+            // idempotency key) if an earlier delivery's acknowledgement was lost. Reuse the
+            // conversation from a prior delivery instead of starting an independent one each
+            // time the redelivery lands, so a participant watching that conversation sees the
+            // eventual response rather than it going to a conversation cancelled out from under
+            // them (see `reusable_setup_failure_debug_bootstrap_conversation` for why this is
+            // safe even while that conversation's prior attempt is still streaming).
+            if bootstraps_setup_failure_debug
+                && let Some(conversation_id) =
+                    self.reusable_setup_failure_debug_bootstrap_conversation(ctx)
+            {
+                log::info!(
+                    "Reusing existing conversation for a redelivered setup-failure debug bootstrap prompt (REMOTE-2661): conversation_id={conversation_id:?}"
+                );
+                if FeatureFlag::AgentView.is_enabled() {
+                    self.context_model.update(ctx, |context_model, ctx| {
+                        context_model.set_pending_query_state_for_existing_conversation(
+                            conversation_id,
+                            AgentViewEntryOrigin::SharedSessionSelection,
+                            ctx,
+                        );
+                    });
+                }
+                self.send_user_query_in_conversation_with_attachments(
+                    prompt,
+                    conversation_id,
+                    Some(participant_id),
+                    file_attachments,
+                    ctx,
+                );
+                return;
+            }
+            if bootstraps_setup_failure_debug {
+                log::info!(
+                    "No prior conversation recorded for this setup-failure debug bootstrap prompt (REMOTE-2661); starting a new one"
+                );
+            }
+
             if FeatureFlag::AgentView.is_enabled() {
                 // If we're already in an empty agent view conversation, reuse it
                 // (so that any command blocks remain visible). Otherwise create a new one for the given prompt.
@@ -929,7 +1034,7 @@ impl BlocklistAIController {
                 };
 
                 if bootstraps_setup_failure_debug {
-                    self.tag_conversation_as_setup_failure_debug_bootstrap(conversation_id, ctx);
+                    self.record_setup_failure_debug_bootstrap_conversation(conversation_id, ctx);
                 }
 
                 self.send_user_query_in_conversation_with_attachments(
@@ -958,7 +1063,7 @@ impl BlocklistAIController {
                 if let Some(conversation_id) = BlocklistAIHistoryModel::as_ref(ctx)
                     .active_conversation_id(self.terminal_surface_id)
                 {
-                    self.tag_conversation_as_setup_failure_debug_bootstrap(conversation_id, ctx);
+                    self.record_setup_failure_debug_bootstrap_conversation(conversation_id, ctx);
                 } else {
                     report_error!(
                         "Could not resolve the bootstrapped debug conversation to tag it"
@@ -968,3 +1073,25 @@ impl BlocklistAIController {
         }
     }
 }
+
+/// Pure decision logic backing `BlocklistAIController::reusable_setup_failure_debug_bootstrap_conversation`.
+/// `has_server_token` looks up whether the given conversation still exists and, if so, whether it
+/// already has a server conversation token; returning `None` means the conversation could not be
+/// found (e.g. it was dropped).
+///
+/// Returns `Some(conversation_id)` only when there is a recorded conversation for this task, it
+/// still resolves to a real conversation, and that conversation has not yet been assigned a
+/// server token. Any other case (nothing recorded, the conversation vanished, or it already has a
+/// token) means the caller must fall through to starting a new conversation instead of reusing.
+fn reusable_bootstrap_conversation(
+    recorded_conversation_id: Option<AIConversationId>,
+    has_server_token: impl FnOnce(AIConversationId) -> Option<bool>,
+) -> Option<AIConversationId> {
+    let conversation_id = recorded_conversation_id?;
+    let has_token = has_server_token(conversation_id)?;
+    (!has_token).then_some(conversation_id)
+}
+
+#[cfg(test)]
+#[path = "shared_session_tests.rs"]
+mod tests;
