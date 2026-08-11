@@ -419,6 +419,190 @@ fn fail_conversation_due_to_shell_exit_reports_error_and_survives_manual_cancel(
     });
 }
 
+/// REMOTE-2661 regression: when a redelivered setup-failure debug bootstrap prompt reuses the
+/// conversation from a prior delivery (rather than starting an independent one), the retry's
+/// exchange must actually run to completion and deliver its answer -- not just "land in the
+/// right conversation" in name only. This exercises the exact mechanism the reuse fix depends
+/// on: `send_query` cancelling the terminal surface's active conversation with
+/// `FollowUpSubmitted { is_for_same_conversation: true }` before sending a new request to it.
+///
+/// That specific reason maps to `CancellationOutcome::KeepInProgress` (see
+/// `CancellationReason::conversation_outcome`), so the conversation's status is never visibly
+/// flipped to `Cancelled` between the two exchanges -- unlike today's bug, where each retry
+/// creates an independent conversation and cancels the *previous* one with
+/// `is_for_same_conversation: false`, which *is* `Cancelled`. The only visible artifact of a
+/// redelivery after this fix is the first exchange itself (if it streamed any partial content)
+/// being individually marked cancelled, immediately followed by the retry's exchange in the same
+/// conversation the participant is already watching.
+#[test]
+fn cancelling_and_resending_within_one_conversation_reports_success() {
+    App::test((), |mut app| async move {
+        initialize_app_for_terminal_view(&mut app);
+        let terminal = add_window_with_terminal(&mut app, None);
+
+        let conversation_id = terminal.update(&mut app, |view, ctx| {
+            let terminal_surface_id = view.id();
+            let stream_id = ResponseStreamId::new_for_test();
+            let conversation_id =
+                BlocklistAIHistoryModel::handle(ctx).update(ctx, |history, ctx| {
+                    let conversation_id = history.start_new_conversation(
+                        terminal_surface_id,
+                        false,
+                        false,
+                        false,
+                        ctx,
+                    );
+                    let task_id = history
+                        .conversation(&conversation_id)
+                        .unwrap()
+                        .get_root_task_id()
+                        .clone();
+                    history
+                        .update_conversation_for_new_request_input(
+                            RequestInput {
+                                conversation_id,
+                                input_messages: HashMap::from([(task_id, vec![])]),
+                                working_directory: None,
+                                model_id: LLMId::from("test-model"),
+                                coding_model_id: LLMId::from("test-coding-model"),
+                                cli_agent_model_id: LLMId::from("test-cli-agent-model"),
+                                computer_use_model_id: LLMId::from("test-computer-use-model"),
+                                shared_session_response_initiator: None,
+                                request_start_ts: Local::now(),
+                                supported_tools_override: None,
+                            },
+                            stream_id.clone(),
+                            terminal_surface_id,
+                            ctx,
+                        )
+                        .unwrap();
+                    history.mark_active_conversation_id(conversation_id, terminal_surface_id, ctx);
+                    conversation_id
+                });
+            let stream = ctx.add_model(|_| ResponseStream::new_for_test(stream_id.clone()));
+            view.ai_controller().update(ctx, |controller, ctx| {
+                controller.register_mock_stream_for_test(
+                    stream_id,
+                    conversation_id,
+                    stream.clone(),
+                    ctx,
+                );
+                // A retry lands while the first exchange is still streaming -- exactly what
+                // `send_query` does before sending any new query to the terminal surface's
+                // active conversation. `is_for_same_conversation: true` because the retry
+                // reuses this same conversation rather than starting a new one.
+                assert!(controller.has_active_stream_for_conversation(conversation_id, ctx));
+                controller.cancel_conversation_progress(
+                    conversation_id,
+                    CancellationReason::FollowUpSubmitted {
+                        is_for_same_conversation: true,
+                    },
+                    ctx,
+                );
+            });
+            conversation_id
+        });
+
+        // The cancelled first exchange must not leave the conversation stuck: since the
+        // cancellation reason keeps it `InProgress` (not `Cancelled`), a subsequent request
+        // is still expected to arrive and finish it.
+        BlocklistAIHistoryModel::handle(&app).read(&app, |history, _| {
+            assert_eq!(
+                history.conversation(&conversation_id).map(|c| c.status()),
+                Some(&crate::ai::agent::conversation::ConversationStatus::InProgress),
+                "a same-conversation follow-up cancellation must not visibly flip the \
+                 conversation to Cancelled between the two exchanges"
+            );
+        });
+
+        // The retry's own exchange: registered on the *same* conversation_id, exactly as
+        // `send_shared_session_query` does when it reuses the recorded bootstrap conversation.
+        let second_stream = terminal.update(&mut app, |view, ctx| {
+            let terminal_surface_id = view.id();
+            let stream_id = ResponseStreamId::new_for_test();
+            BlocklistAIHistoryModel::handle(ctx).update(ctx, |history, ctx| {
+                history
+                    .update_conversation_for_new_request_input(
+                        RequestInput {
+                            conversation_id,
+                            input_messages: HashMap::from([(
+                                history
+                                    .conversation(&conversation_id)
+                                    .unwrap()
+                                    .get_root_task_id()
+                                    .clone(),
+                                vec![],
+                            )]),
+                            working_directory: None,
+                            model_id: LLMId::from("test-model"),
+                            coding_model_id: LLMId::from("test-coding-model"),
+                            cli_agent_model_id: LLMId::from("test-cli-agent-model"),
+                            computer_use_model_id: LLMId::from("test-computer-use-model"),
+                            shared_session_response_initiator: None,
+                            request_start_ts: Local::now(),
+                            supported_tools_override: None,
+                        },
+                        stream_id.clone(),
+                        terminal_surface_id,
+                        ctx,
+                    )
+                    .unwrap();
+            });
+            let stream = ctx.add_model(|_| ResponseStream::new_for_test(stream_id.clone()));
+            view.ai_controller().update(ctx, |controller, ctx| {
+                controller.register_mock_stream_for_test(
+                    stream_id,
+                    conversation_id,
+                    stream.clone(),
+                    ctx,
+                );
+            });
+            stream
+        });
+
+        second_stream.update(&mut app, |stream, ctx| {
+            stream.emit_response_event_for_test(
+                warp_multi_agent_api::ResponseEvent {
+                    r#type: Some(response_event::Type::Init(response_event::StreamInit {
+                        request_id: "retry-request".to_string(),
+                        conversation_id: "retry-server-conversation".to_string(),
+                        run_id: String::new(),
+                    })),
+                },
+                ctx,
+            );
+            stream.emit_response_event_for_test(
+                warp_multi_agent_api::ResponseEvent {
+                    r#type: Some(response_event::Type::Finished(
+                        response_event::StreamFinished {
+                            reason: Some(response_event::stream_finished::Reason::Done(
+                                response_event::stream_finished::Done {},
+                            )),
+                            conversation_usage_metadata: None,
+                            token_usage: vec![],
+                            should_refresh_model_config: false,
+                            request_cost: None,
+                        },
+                    )),
+                },
+                ctx,
+            );
+        });
+
+        // The retry's answer actually arrived, on the same conversation the first (cancelled)
+        // attempt belonged to -- exactly one conversation exists throughout, and it reached a
+        // real terminal answer rather than hanging or silently moving to an invisible conversation.
+        BlocklistAIHistoryModel::handle(&app).read(&app, |history, _| {
+            assert_eq!(
+                history.conversation(&conversation_id).map(|c| c.status()),
+                Some(&crate::ai::agent::conversation::ConversationStatus::Success),
+                "the retry's exchange, sent to the same reused conversation, must run to \
+                 completion and report an answer"
+            );
+        });
+    });
+}
+
 /// An optimistic long-running-command completion that cancels an in-flight
 /// stream must finalize the conversation as `Success`, not `Cancelled`. This is
 /// a regression test for the reason -> status mapping living in a single place
