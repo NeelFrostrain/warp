@@ -30,6 +30,7 @@ use crate::settings::{
 use crate::terminal::input::slash_commands::AcceptSlashCommandOrSavedPrompt;
 use crate::terminal::model::session::active_session::ActiveSession;
 use crate::terminal::view::ambient_agent::AmbientAgentViewModel;
+use crate::terminal::view::is_retained_setup_failure_debug_editable_for_task;
 
 pub struct GuiDataSourceArgs {
     pub active_session: ModelHandle<ActiveSession>,
@@ -203,7 +204,21 @@ impl GuiSlashCommandDataSource {
             availability |= Availability::CLOUD_MODE_V2_COMPOSER;
         }
 
-        if self.is_cloud_mode(ctx) {
+        // REMOTE-2661: a retained environment-setup-failure session has no conversation to
+        // continue, so it must not be gated as an ordinary cloud-agent pane -- from the slash
+        // command's perspective, this is exactly the "no active conversation, need to start
+        // one" case `NOT_CLOUD_AGENT` already exists for, just entered through the debug
+        // follow-up path instead of a brand-new local conversation. `execute_slash_command`
+        // routes `/agent`/`/new` through the authenticated follow-up service for this case.
+        let is_retained_setup_failure_debug_pane = self
+            .ambient_agent_view_model
+            .as_ref()
+            .and_then(|model| model.as_ref(ctx).task_id())
+            .is_some_and(|task_id| is_retained_setup_failure_debug_editable_for_task(task_id, ctx));
+
+        if is_retained_setup_failure_debug_pane {
+            availability |= Availability::NOT_CLOUD_AGENT;
+        } else if self.is_cloud_mode(ctx) {
             availability |= Availability::CLOUD_AGENT;
         } else {
             availability |= Availability::NOT_CLOUD_AGENT;

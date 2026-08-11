@@ -275,6 +275,20 @@ fn is_retained_setup_failure_debug_editable(task: &AmbientAgentTask, app: &AppCo
     task_creator_access(task, app) == ConversationAccess::Edit
 }
 
+/// Task-id-only entry point for [`is_retained_setup_failure_debug_editable`], for callers (e.g.
+/// the `/agent` slash command's availability gate) that know the ambient task id but do not hold
+/// a locked [`TerminalModel`] the way [`resolve_ai_query_routing`] requires. Returns `false`
+/// (never treats "not yet fetched" as eligible) when the task hasn't been fetched into
+/// [`AgentConversationsModel`] yet, matching `resolve_ai_query_routing`'s own behavior.
+pub(crate) fn is_retained_setup_failure_debug_editable_for_task(
+    task_id: AmbientAgentTaskId,
+    app: &AppContext,
+) -> bool {
+    AgentConversationsModel::as_ref(app)
+        .get_task_data(&task_id)
+        .is_some_and(|task| is_retained_setup_failure_debug_editable(&task, app))
+}
+
 fn continuation_ui_state_for_harness_and_access(
     harness: AIAgentHarness,
     access: ConversationAccess,

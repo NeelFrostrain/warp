@@ -28,6 +28,7 @@ use super::network::{
 use super::orchestration_viewer_model::OrchestrationViewerModel;
 use crate::ai::active_agent_views_model::ActiveAgentViewsModel;
 use crate::ai::agent::conversation::ConversationStatus;
+use crate::ai::agent_conversations_model::AgentConversationsModel;
 use crate::ai::ambient_agents::AmbientAgentTaskId;
 use crate::ai::blocklist::agent_view::{AgentViewController, AgentViewControllerEvent};
 use crate::ai::blocklist::orchestration_event_streamer::OrchestrationEventStreamer;
@@ -842,6 +843,17 @@ impl TerminalManager {
                     if let Some(task_id) = ambient_task_id {
                         ActiveAgentViewsModel::handle(ctx).update(ctx, |model, ctx| {
                             model.register_ambient_session(terminal_view_id, task_id, ctx);
+                        });
+
+                        // REMOTE-2661: `resolve_ai_query_routing`'s retained-setup-failure-debug
+                        // check reads this cache synchronously and must not silently fall back to
+                        // the ordinary live-viewer path just because the task list's own polling
+                        // hasn't reached this task yet (e.g. a viewer who joined via a direct
+                        // session link rather than through the task list). Warm it eagerly here,
+                        // well before the viewer can type anything, instead of leaving routing
+                        // correctness dependent on an incidentally-warm cache.
+                        AgentConversationsModel::handle(ctx).update(ctx, |model, ctx| {
+                            model.get_or_async_fetch_task_data(&task_id, ctx);
                         });
                     }
                 }

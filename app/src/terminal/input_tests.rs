@@ -1450,6 +1450,90 @@ fn maybe_route_ai_query_to_remote_target_blocks_read_only_viewer() {
 }
 
 #[test]
+fn maybe_route_ai_query_to_remote_target_blocks_ambient_viewer_with_unresolved_task() {
+    // REMOTE-2661: an ambient live viewer whose task has not yet been fetched into
+    // `AgentConversationsModel` (e.g. joined via a direct session link rather than through the
+    // task list) must not be silently routed to the ordinary live-viewer path just because
+    // eligibility for the retained-setup-failure debug route is unknown. It must be blocked with
+    // a clear signal instead, distinct from a submission that is *known* ineligible.
+    App::test((), |mut app| async move {
+        let _agent_management_guard =
+            crate::features::FeatureFlag::AgentManagementView.override_enabled(false);
+        initialize_app(&mut app);
+
+        let tips_model = app.add_model(|_| TipsCompleted::default());
+        let (window_id, terminal) = app.add_window(WindowStyle::NotStealFocus, move |ctx| {
+            TerminalView::new_for_test(tips_model, None, ctx)
+        });
+        let task_id: crate::ai::ambient_agents::AmbientAgentTaskId =
+            "550e8400-e29b-41d4-a716-000000000099".parse().unwrap();
+        terminal.update(&mut app, |view, _| {
+            let mut model = view.model.lock();
+            model.block_list_mut().set_bootstrapped();
+            model
+                .block_list_mut()
+                .active_block_for_test()
+                .set_session_id(SessionId::from(0));
+            model.set_shared_session_source(
+                crate::terminal::shared_session::SharedSessionSource::ambient_agent(Some(
+                    task_id.to_string(),
+                )),
+            );
+            model.set_shared_session_status(SharedSessionStatus::executor());
+        });
+
+        let input = terminal.read(&app, |view, _| view.input().clone());
+
+        let sent = Rc::new(RefCell::new(Vec::<String>::new()));
+        let sent_cb = sent.clone();
+        app.update(|ctx| {
+            ctx.subscribe_to_view(&input, move |_, event: &super::Event, _| {
+                if let super::Event::SendAgentPrompt { prompt, .. } = event {
+                    sent_cb.borrow_mut().push(prompt.clone());
+                }
+            });
+        });
+
+        let toasted = Rc::new(RefCell::new(false));
+        let toasted_cb = toasted.clone();
+        app.update(|ctx| {
+            ctx.subscribe_to_model(
+                &ToastStack::handle(ctx),
+                move |_, event: &crate::workspace::ToastStackEvent, _| {
+                    if matches!(
+                        event,
+                        crate::workspace::ToastStackEvent::AddEphemeralToast { window_id: w, .. }
+                            if *w == window_id
+                    ) {
+                        *toasted_cb.borrow_mut() = true;
+                    }
+                },
+            );
+        });
+
+        input.update(&mut app, |input, ctx| {
+            input.replace_buffer_content("why did my setup fail", ctx);
+        });
+
+        let handled = input.update(&mut app, |input, ctx| {
+            input.maybe_route_ai_query_to_remote_target(ctx)
+        });
+        assert!(
+            handled,
+            "an unresolved-eligibility ambient viewer submission must be handled (blocked), not silently fall through"
+        );
+        assert!(
+            sent.borrow().is_empty(),
+            "an unresolved-eligibility submission must never reach the direct viewer prompt path"
+        );
+        assert!(
+            *toasted.borrow(),
+            "the user must get a clear signal, not a submission that silently vanishes"
+        );
+    });
+}
+
+#[test]
 fn maybe_route_ai_query_to_remote_target_forwards_executor_viewer_prompt() {
     // An executor viewer forwards the prompt to the sharer (SendAgentPrompt) instead of running
     // it on the viewer's local machine.

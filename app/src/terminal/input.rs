@@ -4205,6 +4205,44 @@ impl Input {
             return false;
         }
 
+        // REMOTE-2661: `resolve_ai_query_routing`'s retained-setup-failure-debug check can only
+        // answer "eligible" or "not eligible" once the task has actually been fetched into
+        // `AgentConversationsModel` -- an absent task is indistinguishable from a genuinely
+        // ineligible one at that call site, so it silently falls through to the ordinary
+        // `LiveRemoteVm` path. Eligibility being *unknown* must not be treated the same as
+        // *known ineligible*: block the submission, kick off (or dedupe) the fetch, and tell the
+        // user to retry, rather than let it invisibly reopen a route this feature deliberately
+        // closed. Scoped to an attached ambient live viewer specifically, since that's the one
+        // case this silent fallback is unsafe for; an ordinary composing pane with no ambient
+        // task yet is unaffected.
+        if let Some(task_id) = {
+            let model = self.model.lock();
+            let is_active_ambient_viewer = model.shared_session_status().is_active_viewer()
+                && (model.is_shared_ambient_agent_session()
+                    || self
+                        .ambient_agent_view_model()
+                        .is_some_and(|m| m.as_ref(ctx).is_ambient_agent()));
+            is_active_ambient_viewer
+                .then(|| {
+                    self.ambient_agent_view_model()
+                        .and_then(|m| m.as_ref(ctx).task_id())
+                        .or_else(|| model.ambient_agent_task_id())
+                })
+                .flatten()
+        } && AgentConversationsModel::as_ref(ctx)
+            .get_task_data(&task_id)
+            .is_none()
+        {
+            AgentConversationsModel::handle(ctx).update(ctx, |model, ctx| {
+                model.get_or_async_fetch_task_data(&task_id, ctx);
+            });
+            self.show_ephemeral_error_toast(
+                "Still checking this session's status — please try sending your message again in a moment.",
+                ctx,
+            );
+            return true;
+        }
+
         // Route by the shared source of truth. A live shared-session viewer forwards to the sharer
         // (an ambient cloud run or a shared local session); the other arms cover panes that are not
         // attached to a live session.
