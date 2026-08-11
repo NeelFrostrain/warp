@@ -194,6 +194,7 @@ fn ambient_agent_task(
         artifacts: vec![],
         last_event_sequence: None,
         children: vec![],
+        debug_agent_available: false,
     }
 }
 
@@ -544,6 +545,7 @@ fn environment_setup_failure_without_conversation_shows_tombstone_without_cta() 
                 message: "Environment setup failed: Failed to run setup command: hi".to_string(),
                 error_code: Some(TaskStatusErrorCode::EnvironmentSetupFailed),
                 session_debug_until: None,
+                debug_agent_active: false,
             });
             model.insert_task_for_test(task);
         });
@@ -579,6 +581,7 @@ fn environment_setup_failure_with_conversation_shows_continue_cta() {
                 message: "Environment setup failed: Failed to run setup command: hi".to_string(),
                 error_code: Some(TaskStatusErrorCode::EnvironmentSetupFailed),
                 session_debug_until: None,
+                debug_agent_active: false,
             });
             model.insert_task_for_test(task);
         });
@@ -592,6 +595,102 @@ fn environment_setup_failure_with_conversation_shows_continue_cta() {
                 Ok(CloudConversationContinuationUiState::Tombstone {
                     cta: Some(TombstoneCta::ContinueInCloud { task_id }),
                 })
+            );
+        });
+    });
+}
+
+/// The debug tombstone CTA and routing require the real, server-computed
+/// `debug_agent_available` capability (REMOTE-2661/warp-server#14231), not just the
+/// client-observable proxy conditions (failure-like state, `ENVIRONMENT_SETUP_FAILED`, no
+/// conversation, an open `session_debug_until` window, and creator access). An older/ineligible
+/// server response defaults `debug_agent_available` to `false`, so this must fail closed to the
+/// ordinary no-CTA tombstone rather than trusting the proxy alone.
+#[test]
+fn retained_setup_failure_without_debug_agent_available_shows_plain_tombstone() {
+    App::test((), |mut app| async move {
+        let TestHandles {
+            terminal_view_id,
+            task_id,
+        } = setup_app(
+            &mut app,
+            AuthFixture::LoggedIn,
+            AIAgentHarness::ClaudeCode,
+            ConversationPermissionFixture::CurrentUserOwner,
+        );
+        AgentConversationsModel::handle(&app).update(&mut app, |model, _| {
+            let mut task =
+                ambient_agent_task(task_id, CONVERSATION_TOKEN, AmbientAgentTaskState::Failed);
+            task.conversation_id = None;
+            task.debug_agent_available = false;
+            task.status_message = Some(TaskStatusMessage {
+                message: "Environment setup failed: Failed to run setup command: hi".to_string(),
+                error_code: Some(TaskStatusErrorCode::EnvironmentSetupFailed),
+                session_debug_until: Some(Utc::now() + chrono::Duration::minutes(5)),
+                debug_agent_active: false,
+            });
+            model.insert_task_for_test(task);
+        });
+
+        app.update(|ctx| {
+            let state =
+                resolve_cloud_conversation_continuation_ui_state(terminal_view_id, task_id, ctx);
+            assert_eq!(
+                state,
+                Ok(CloudConversationContinuationUiState::Tombstone { cta: None })
+            );
+
+            let model = ambient_pane_model(task_id, SharedSessionStatus::NotShared);
+            assert_ne!(
+                resolve_ai_query_routing(terminal_view_id, None, &model, ctx),
+                AIQueryRouting::RetainedSetupFailureDebug { task_id }
+            );
+        });
+    });
+}
+
+/// Once `debug_agent_available` is true (server-eligible) and the other conditions hold, both the
+/// tombstone CTA and the pane's follow-up routing must switch to the REMOTE-2661 debug path.
+#[test]
+fn retained_setup_failure_with_debug_agent_available_shows_debug_cta_and_routing() {
+    App::test((), |mut app| async move {
+        let TestHandles {
+            terminal_view_id,
+            task_id,
+        } = setup_app(
+            &mut app,
+            AuthFixture::LoggedIn,
+            AIAgentHarness::ClaudeCode,
+            ConversationPermissionFixture::CurrentUserOwner,
+        );
+        AgentConversationsModel::handle(&app).update(&mut app, |model, _| {
+            let mut task =
+                ambient_agent_task(task_id, CONVERSATION_TOKEN, AmbientAgentTaskState::Failed);
+            task.conversation_id = None;
+            task.debug_agent_available = true;
+            task.status_message = Some(TaskStatusMessage {
+                message: "Environment setup failed: Failed to run setup command: hi".to_string(),
+                error_code: Some(TaskStatusErrorCode::EnvironmentSetupFailed),
+                session_debug_until: Some(Utc::now() + chrono::Duration::minutes(5)),
+                debug_agent_active: false,
+            });
+            model.insert_task_for_test(task);
+        });
+
+        app.update(|ctx| {
+            let state =
+                resolve_cloud_conversation_continuation_ui_state(terminal_view_id, task_id, ctx);
+            assert_eq!(
+                state,
+                Ok(CloudConversationContinuationUiState::Tombstone {
+                    cta: Some(TombstoneCta::DebugRetainedSetupFailure { task_id }),
+                })
+            );
+
+            let model = ambient_pane_model(task_id, SharedSessionStatus::NotShared);
+            assert_eq!(
+                resolve_ai_query_routing(terminal_view_id, None, &model, ctx),
+                AIQueryRouting::RetainedSetupFailureDebug { task_id }
             );
         });
     });

@@ -142,6 +142,7 @@ fn make_task_with_name(
         artifacts: vec![],
         last_event_sequence: None,
         children: vec![],
+        debug_agent_available: false,
     }
 }
 

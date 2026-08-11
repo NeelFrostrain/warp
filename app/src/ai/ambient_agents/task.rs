@@ -207,6 +207,16 @@ pub struct AmbientAgentTask {
     /// driver case). Empty on older servers.
     #[serde(default)]
     pub children: Vec<String>,
+
+    /// Server-computed capability (REMOTE-2661, warp-server#14231): whether a debug agent may be
+    /// bootstrapped into this run's retained environment-setup-failure session right now. Derived
+    /// server-side from the same eligibility resolver the dispatcher uses (retained execution
+    /// match, both feature flags, an open-or-pinned debug window) plus the batched
+    /// sandbox-reachability signal also used for `is_sandbox_running` — signals this client
+    /// cannot compute on its own. `#[serde(default)]` so an older server that never sends the
+    /// field, or an ineligible run, deserializes to `false` (fail closed).
+    #[serde(default)]
+    pub debug_agent_available: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -291,17 +301,21 @@ impl AmbientAgentTask {
     }
 
     /// Whether this run is a still-open, no-conversation-yet environment-setup-failure retained
-    /// session: a client-side proxy for the server's REMOTE-2661 eligibility predicate.
+    /// session eligible for a debug agent bootstrap (REMOTE-2661).
     ///
-    /// This cannot fully replicate the server's check: the client has no field for the
-    /// server-internal retained-execution ID, the open debug deadline, or a sharer capability
-    /// advertisement, none of which are exposed to it today. The server independently
+    /// ANDs the server-computed `debug_agent_available` capability (warp-server#14231) — which
+    /// also accounts for both eligibility feature flags and the batched sandbox-reachability
+    /// signal, neither of which the client can see — with the client-observable conditions this
+    /// helper checked before that field existed. `debug_agent_available` defaults to `false` on
+    /// an older server that never sends it, so this fails closed rather than falling back to the
+    /// client-only proxy. The server remains the sole authority regardless: it independently
     /// re-verifies eligibility before accepting a debug follow-up or letting an `IN_PROGRESS`
-    /// report from it reopen the run (see `BeginTaskProgress`'s retained-execution guard), so
-    /// this helper only decides what the *client* should present as editable and where it
-    /// should route a submission — never what is safe to allow.
+    /// report reopen the run (see `BeginTaskProgress`'s retained-execution guard), so this helper
+    /// only decides what the *client* should present as editable and where to route a
+    /// submission — never what is safe to allow.
     pub fn is_open_for_setup_failure_debug_bootstrap(&self) -> bool {
-        self.state.is_failure_like()
+        self.debug_agent_available
+            && self.state.is_failure_like()
             && self
                 .status_message
                 .as_ref()
@@ -551,6 +565,11 @@ pub struct TaskStatusMessage {
     /// — which callers must treat as "no debug window is known to be open", not as an error.
     #[serde(default)]
     pub session_debug_until: Option<DateTime<Utc>>,
+    /// True while a REMOTE-2661 debug turn is actively pinning the idle timer. Display-only and
+    /// separate from `session_debug_until`, which can lag while pinned (see
+    /// `DebugWindowController`). `#[serde(default)]` for older servers / no active turn.
+    #[serde(default, alias = "debugAgentActive")]
+    pub debug_agent_active: bool,
 }
 
 #[derive(Clone, Serialize, Deserialize, Debug, PartialEq, Eq)]

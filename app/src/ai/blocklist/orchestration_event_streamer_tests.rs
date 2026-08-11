@@ -207,6 +207,7 @@ fn make_ambient_task_with_event_seq(
         is_sandbox_running: false,
         last_event_sequence,
         children: vec![],
+        debug_agent_available: false,
     }
 }
 
