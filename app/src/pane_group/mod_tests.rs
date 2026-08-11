@@ -317,6 +317,7 @@ fn ambient_agent_task_for_current_user(task_id: AmbientAgentTaskId) -> AmbientAg
         last_event_sequence: None,
         children: vec![],
         debug_agent_available: false,
+        scope: None,
     }
 }
 

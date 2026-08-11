@@ -135,6 +135,7 @@ fn owned_resumable_oz_task(task_id: AmbientAgentTaskId) -> AmbientAgentTask {
         last_event_sequence: None,
         children: vec![],
         debug_agent_available: false,
+        scope: None,
     }
 }
 

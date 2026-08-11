@@ -12,7 +12,8 @@ use crate::ai::agent::api::ServerConversationToken;
 use crate::ai::agent::conversation::{AIAgentHarness, ServerAIConversationMetadata};
 use crate::ai::agent_conversations_model::AgentConversationsModel;
 use crate::ai::ambient_agents::task::{
-    AgentConfigSnapshot, HarnessConfig, TaskPrincipalInfo, TaskStatusErrorCode, TaskStatusMessage,
+    AgentConfigSnapshot, HarnessConfig, TaskPrincipalInfo, TaskScope, TaskStatusErrorCode,
+    TaskStatusMessage,
 };
 use crate::ai::ambient_agents::{
     AgentSource, AmbientAgentTask, AmbientAgentTaskId, AmbientAgentTaskState,
@@ -195,6 +196,7 @@ fn ambient_agent_task(
         last_event_sequence: None,
         children: vec![],
         debug_agent_available: false,
+        scope: None,
     }
 }
 
@@ -691,6 +693,103 @@ fn retained_setup_failure_with_debug_agent_available_shows_debug_cta_and_routing
             assert_eq!(
                 resolve_ai_query_routing(terminal_view_id, None, &model, ctx),
                 AIQueryRouting::RetainedSetupFailureDebug { task_id }
+            );
+        });
+    });
+}
+
+/// A team-owned retained setup-failure run must offer the Debug CTA to a team member who is
+/// not the literal creator, mirroring the pre-existing team-ownership recognition
+/// `third_party_conversation_owned_by_current_team_shows_continue_in_cloud_tombstone` already
+/// proves for the post-conversation-exists case. `creator` is only ever a natural person (see
+/// `RunCreatorInfoType`), so before `AmbientAgentTask::scope` existed, this predicate could
+/// only ever recognize the exact original creator — denying every other team member a CTA the
+/// server would have genuinely authorized them for.
+#[test]
+fn retained_setup_failure_owned_by_current_team_shows_debug_cta_for_non_creator() {
+    App::test((), |mut app| async move {
+        let TestHandles {
+            terminal_view_id,
+            task_id,
+        } = setup_app(
+            &mut app,
+            AuthFixture::LoggedIn,
+            AIAgentHarness::Oz,
+            ConversationPermissionFixture::CurrentTeamOwner,
+        );
+        AgentConversationsModel::handle(&app).update(&mut app, |model, _| {
+            let mut task =
+                ambient_agent_task(task_id, CONVERSATION_TOKEN, AmbientAgentTaskState::Failed)
+                    .with_creator("someone-else-on-the-team");
+            task.conversation_id = None;
+            task.debug_agent_available = true;
+            task.scope = Some(TaskScope {
+                scope_type: "TEAM".to_string(),
+                uid: test_team_uid().to_string(),
+            });
+            task.status_message = Some(TaskStatusMessage {
+                message: "Environment setup failed: Failed to run setup command: hi".to_string(),
+                error_code: Some(TaskStatusErrorCode::EnvironmentSetupFailed),
+                session_debug_until: Some(Utc::now() + chrono::Duration::minutes(5)),
+                debug_agent_active: false,
+            });
+            model.insert_task_for_test(task);
+        });
+
+        app.update(|ctx| {
+            let state =
+                resolve_cloud_conversation_continuation_ui_state(terminal_view_id, task_id, ctx);
+            assert_eq!(
+                state,
+                Ok(CloudConversationContinuationUiState::Tombstone {
+                    cta: Some(TombstoneCta::DebugRetainedSetupFailure { task_id }),
+                }),
+                "a fellow team member must be offered the Debug CTA even though they are not the run's literal creator"
+            );
+        });
+    });
+}
+
+/// The team-membership recognition above must not grant access to a stranger: a team-owned
+/// run's CTA stays hidden for a viewer who does not belong to that team.
+#[test]
+fn retained_setup_failure_owned_by_a_different_team_shows_no_cta() {
+    App::test((), |mut app| async move {
+        let TestHandles {
+            terminal_view_id,
+            task_id,
+        } = setup_app(
+            &mut app,
+            AuthFixture::LoggedIn,
+            AIAgentHarness::Oz,
+            ConversationPermissionFixture::CurrentUserOwner,
+        );
+        AgentConversationsModel::handle(&app).update(&mut app, |model, _| {
+            let mut task =
+                ambient_agent_task(task_id, CONVERSATION_TOKEN, AmbientAgentTaskState::Failed)
+                    .with_creator("someone-on-another-team");
+            task.conversation_id = None;
+            task.debug_agent_available = true;
+            task.scope = Some(TaskScope {
+                scope_type: "TEAM".to_string(),
+                uid: ServerId::from(999).to_string(),
+            });
+            task.status_message = Some(TaskStatusMessage {
+                message: "Environment setup failed: Failed to run setup command: hi".to_string(),
+                error_code: Some(TaskStatusErrorCode::EnvironmentSetupFailed),
+                session_debug_until: Some(Utc::now() + chrono::Duration::minutes(5)),
+                debug_agent_active: false,
+            });
+            model.insert_task_for_test(task);
+        });
+
+        app.update(|ctx| {
+            let state =
+                resolve_cloud_conversation_continuation_ui_state(terminal_view_id, task_id, ctx);
+            assert_eq!(
+                state,
+                Ok(CloudConversationContinuationUiState::Tombstone { cta: None }),
+                "a viewer on an unrelated team must not be offered the Debug CTA"
             );
         });
     });

@@ -15,6 +15,7 @@ use crate::ai::blocklist::BlocklistAIHistoryModel;
 use crate::auth::AuthStateProvider;
 use crate::cloud_object::{Owner, ServerGuestSubject};
 use crate::drive::sharing::SharingAccessLevel;
+use crate::server::ids::ServerId;
 use crate::terminal::TerminalModel;
 use crate::terminal::view::ambient_agent::AmbientAgentViewModel;
 use crate::workspaces::user_workspaces::UserWorkspaces;
@@ -380,11 +381,22 @@ fn conversation_access(
     }
 }
 
+/// Whether the current principal may edit a task with no conversation yet: either the exact
+/// person who created it, or — for a team-owned run — a member of the owning team, mirroring
+/// the team-membership check `conversation_access` already applies once a conversation exists
+/// (see below). `creator` is only ever a natural person or service account (never a team; see
+/// `RunCreatorInfoType`), so an inherited, task-only proxy that checked `creator` alone could
+/// never recognize any other team member as authorized — including on the pre-existing
+/// `ContinueInCloud` tombstone this predicate was originally written for, not just the newer
+/// `DebugRetainedSetupFailure` one (REMOTE-2661) that reuses it.
 fn task_creator_access(task: &AmbientAgentTask, app: &AppContext) -> ConversationAccess {
+    if is_current_user_on_owning_team(task, app) {
+        return ConversationAccess::Edit;
+    }
+
     let Some(current_user_uid) = AuthStateProvider::as_ref(app).get().user_id() else {
         return ConversationAccess::Unknown;
     };
-
     if task
         .creator
         .as_ref()
@@ -394,6 +406,18 @@ fn task_creator_access(task: &AmbientAgentTask, app: &AppContext) -> Conversatio
     } else {
         ConversationAccess::Unknown
     }
+}
+
+fn is_current_user_on_owning_team(task: &AmbientAgentTask, app: &AppContext) -> bool {
+    let Some(scope) = task.scope.as_ref().filter(|scope| scope.is_team()) else {
+        return false;
+    };
+    let Ok(team_uid) = ServerId::try_from(scope.uid.as_str()) else {
+        return false;
+    };
+    UserWorkspaces::as_ref(app)
+        .team_from_uid_across_all_workspaces(team_uid)
+        .is_some()
 }
 
 fn task_harness(task: &AmbientAgentTask) -> AIAgentHarness {

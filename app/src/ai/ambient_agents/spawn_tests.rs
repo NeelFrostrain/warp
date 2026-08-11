@@ -43,6 +43,7 @@ fn task_with(
         last_event_sequence: None,
         children: vec![],
         debug_agent_available: false,
+        scope: None,
     }
 }
 

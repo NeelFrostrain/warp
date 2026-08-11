@@ -80,6 +80,7 @@ fn create_test_task(
         last_event_sequence: None,
         children: vec![],
         debug_agent_available: false,
+        scope: None,
     }
 }
 

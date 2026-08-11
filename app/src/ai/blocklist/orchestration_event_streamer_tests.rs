@@ -208,6 +208,7 @@ fn make_ambient_task_with_event_seq(
         last_event_sequence,
         children: vec![],
         debug_agent_available: false,
+        scope: None,
     }
 }
 

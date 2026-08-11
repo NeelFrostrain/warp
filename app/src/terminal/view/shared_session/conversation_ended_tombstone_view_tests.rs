@@ -49,6 +49,7 @@ fn task_with_run_time_and_credits() -> AmbientAgentTask {
         last_event_sequence: None,
         children: vec![],
         debug_agent_available: false,
+        scope: None,
     }
 }
 

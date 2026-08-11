@@ -143,6 +143,7 @@ fn make_task_with_name(
         last_event_sequence: None,
         children: vec![],
         debug_agent_available: false,
+        scope: None,
     }
 }
 

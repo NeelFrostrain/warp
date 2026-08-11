@@ -161,6 +161,24 @@ where
     })
 }
 
+/// Ownership scope for a run: personal (a single user) or team-owned. Mirrors the public
+/// API's `RunItem.scope`, distinct from `creator` (always the natural person who created the
+/// run, never a team) — a team-owned run's other team members are legitimate collaborators on
+/// it despite not being its literal creator.
+#[derive(Clone, Serialize, Deserialize, Debug, PartialEq, Default)]
+pub struct TaskScope {
+    #[serde(rename = "type", default)]
+    pub scope_type: String,
+    #[serde(default)]
+    pub uid: String,
+}
+
+impl TaskScope {
+    pub fn is_team(&self) -> bool {
+        self.scope_type.eq_ignore_ascii_case("team")
+    }
+}
+
 #[derive(Clone, Serialize, Deserialize, Debug, PartialEq)]
 pub struct AmbientAgentTask {
     pub task_id: AmbientAgentTaskId,
@@ -217,6 +235,12 @@ pub struct AmbientAgentTask {
     /// field, or an ineligible run, deserializes to `false` (fail closed).
     #[serde(default)]
     pub debug_agent_available: bool,
+
+    /// This run's ownership scope (personal or team). `#[serde(default)]` for an older server
+    /// that never sends it, in which case only the exact literal creator is recognized as
+    /// authorized — the same behavior as before this field existed.
+    #[serde(default)]
+    pub scope: Option<TaskScope>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
