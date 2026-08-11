@@ -6,9 +6,10 @@ use std::sync::mpsc::SyncSender;
 
 use parking_lot::FairMutex;
 use session_sharing_protocol::common::{
-    ActivePrompt, AgentPromptFailureReason, CLIAgentSessionState, CommandExecutionFailureReason,
-    ControlAction, ControlActionFailureReason, LongRunningCommandAgentInteraction,
-    SelectedAgentModel, UniversalDeveloperInputContextUpdate, WriteToPtyFailureReason,
+    ActivePrompt, AgentPromptFailureReason, AgentPromptRequest, CLIAgentSessionState,
+    CommandExecutionFailureReason, ControlAction, ControlActionFailureReason,
+    LongRunningCommandAgentInteraction, ParticipantId, SelectedAgentModel,
+    UniversalDeveloperInputContextUpdate, WriteToPtyFailureReason,
 };
 #[cfg(not(any(test, feature = "integration_tests")))]
 use session_sharing_protocol::common::{
@@ -43,6 +44,7 @@ use crate::features::FeatureFlag;
 use crate::network::{NetworkStatusEvent, NetworkStatusKind};
 use crate::pane_group::TerminalViewResources;
 use crate::persistence::ModelEvent;
+use crate::server::server_api::ServerApiProvider;
 use crate::server::telemetry::{TelemetryAgentViewEntryOrigin, TelemetryEvent};
 use crate::terminal::cli_agent_sessions::{
     CLIAgentInputState, CLIAgentSessionsModel, CLIAgentSessionsModelEvent,
@@ -81,6 +83,81 @@ const ACL_UPDATE_FAILURE_RESPONSE: &str = "Something went wrong. Please try agai
 /// buffer stays in sync.
 fn should_skip_sharer_op(is_ambient_session: bool, op: &CrdtOperation) -> bool {
     is_ambient_session && matches!(op, CrdtOperation::UpdateSelections(_))
+}
+
+/// Decides whether a no-token agent prompt should be honored against a retained
+/// environment-setup-failure debug session, per the REMOTE-2661 `setupFailureDebugAuthorization`
+/// server callback (see the sharer's `AgentPromptRequested` handling). The sharer cannot
+/// authenticate the requesting participant itself, so this is the sole authority: every outcome
+/// other than an explicit `Ok(true)` from the server -- an unresolvable participant UID, a
+/// denied authorization, a `UserFacingError`, or the call failing outright (including a
+/// workload-token issuance failure) -- rejects the prompt. There is deliberately no local
+/// fallback.
+async fn is_setup_failure_debug_prompt_authorized(
+    ai_client: &Arc<dyn crate::server::server_api::ai::AIClient>,
+    task_id: crate::ai::ambient_agents::AmbientAgentTaskId,
+    participant_firebase_uid: Option<crate::auth::UserUid>,
+    workload_token: Option<String>,
+) -> bool {
+    let (Some(participant_firebase_uid), Some(workload_token)) =
+        (participant_firebase_uid, workload_token)
+    else {
+        return false;
+    };
+    ai_client
+        .setup_failure_debug_authorization(
+            task_id,
+            workload_token,
+            participant_firebase_uid.as_string(),
+        )
+        .await
+        .unwrap_or(false)
+}
+
+/// Honors an already-authorized agent prompt: writes it to the CLI harness PTY when one is
+/// active, or executes it against the Oz harness otherwise.
+///
+/// Callers must have already established that `participant_id` is allowed to submit this
+/// prompt (permissions/AI-enabled checks, and for a no-token REMOTE-2661 debug bootstrap, the
+/// `setupFailureDebugAuthorization` server callback) before calling this.
+fn accept_agent_prompt(
+    terminal_view: &ViewHandle<TerminalView>,
+    request: AgentPromptRequest,
+    participant_id: ParticipantId,
+    ctx: &mut AppContext,
+) {
+    let terminal_view_id = terminal_view.id();
+    let has_active_cli_agent = CLIAgentSessionsModel::as_ref(ctx)
+        .session(terminal_view_id)
+        .is_some();
+    if has_active_cli_agent {
+        // Reuse the rich input submit pipeline so agent-specific
+        // strategies are applied. Bypasses the rich-input-UI side effects
+        // (telemetry, draft clear, editor buffer clear, pending-image consumption).
+        terminal_view.update(ctx, |view, ctx| {
+            view.submit_text_to_cli_agent_pty(request.prompt.clone(), ctx);
+        });
+        return;
+    }
+
+    // Execute the agent prompt in the Oz-harness case.
+    terminal_view.update(ctx, |view, ctx| {
+        // Restore the sharer's frozen visual state. The buffer is cleared by
+        // system_clear_buffer when SentRequest fires from execute_agent_prompt_for_shared_session.
+        view.input().update(ctx, |input, ctx| {
+            input.unfreeze_agent_input(false, ctx);
+        });
+
+        view.ai_controller().update(ctx, |ai_controller, ctx| {
+            ai_controller.execute_agent_prompt_for_shared_session(
+                request.prompt.clone(),
+                request.server_conversation_token,
+                request.attachments.clone(),
+                participant_id.clone(),
+                ctx,
+            );
+        });
+    });
 }
 
 /// Configuration for constructing the GUI terminal surface.
@@ -1358,33 +1435,83 @@ impl TerminalManager<TerminalView> {
                     }
 
                     // REMOTE-2661: a no-token prompt is how a debug conversation gets
-                    // bootstrapped into a retained environment-setup-failure session, but that
-                    // bootstrap must only ever arrive via the authenticated run follow-up
-                    // service (see `execute_agent_prompt_for_shared_session`'s tagging of the
-                    // resulting conversation). Reject a viewer's no-token prompt sent straight
-                    // over the session-sharing link instead, closing the bypass an old or
-                    // modified viewer could otherwise use to start a conversation and reopen
-                    // the run without follow-up authorization.
+                    // bootstrapped into a retained environment-setup-failure session. The
+                    // sharer cannot authenticate who is actually asking on its own -- it only
+                    // knows the participant's `firebase_uid` as reported by the session-sharing
+                    // presence list, which is not itself a credential. So a no-token prompt
+                    // against a retained, eligible session must be authorized by the server's
+                    // `setupFailureDebugAuthorization` callback before being honored; there is
+                    // no local fallback if that call is unavailable, errors, or denies.
                     if request.server_conversation_token.is_none() {
-                        let is_retained_setup_failure_debug_session = model
-                            .lock()
-                            .ambient_agent_task_id()
-                            .is_some_and(|task_id| {
-                                AgentConversationsModel::as_ref(ctx)
-                                    .get_task_data(&task_id)
-                                    .is_some_and(|task| {
-                                        task.is_open_for_setup_failure_debug_bootstrap()
-                                    })
-                            });
-                        if is_retained_setup_failure_debug_session {
-                            log::warn!(
-                                "Rejecting a no-token agent prompt from a viewer while retaining a setup-failed run (REMOTE-2661); it must go through the authenticated follow-up service instead"
-                            );
-                            network.update(ctx, |network, _ctx| {
-                                network.send_agent_prompt_rejection(
-                                    id.clone(),
-                                    participant_id.clone(),
-                                    AgentPromptFailureReason::InsufficientPermissions,
+                        let task_id = model.lock().ambient_agent_task_id().filter(|task_id| {
+                            AgentConversationsModel::as_ref(ctx)
+                                .get_task_data(task_id)
+                                .is_some_and(|task| task.is_open_for_setup_failure_debug_bootstrap())
+                        });
+                        if let Some(task_id) = task_id {
+                            let participant_firebase_uid = terminal_view
+                                .as_ref(ctx)
+                                .shared_session_presence_manager()
+                                .and_then(|manager| {
+                                    manager.as_ref(ctx).viewer_firebase_uid(participant_id)
+                                });
+                            let Some(participant_firebase_uid) = participant_firebase_uid else {
+                                log::warn!(
+                                    "Rejecting a no-token agent prompt (REMOTE-2661): participant_id={participant_id} has no resolvable firebase_uid to authorize"
+                                );
+                                network.update(ctx, |network, _ctx| {
+                                    network.send_agent_prompt_rejection(
+                                        id.clone(),
+                                        participant_id.clone(),
+                                        AgentPromptFailureReason::InsufficientPermissions,
+                                    );
+                                });
+                                return;
+                            };
+
+                            let ai_client = ServerApiProvider::as_ref(ctx).get_ai_client();
+                            let id = id.clone();
+                            let participant_id = participant_id.clone();
+                            let request = request.clone();
+                            let terminal_view = terminal_view.clone();
+
+                            network.update(ctx, move |_network, ctx| {
+                                ctx.spawn(
+                                    async move {
+                                        let workload_token =
+                                            warp_isolation_platform::issue_workload_token(Some(
+                                                std::time::Duration::from_secs(60),
+                                            ))
+                                            .await
+                                            .map(|issued| issued.token)
+                                            .ok();
+                                        is_setup_failure_debug_prompt_authorized(
+                                            &ai_client,
+                                            task_id,
+                                            Some(participant_firebase_uid),
+                                            workload_token,
+                                        )
+                                        .await
+                                    },
+                                    move |network, authorized, ctx| {
+                                        if authorized {
+                                            accept_agent_prompt(
+                                                &terminal_view,
+                                                request,
+                                                participant_id,
+                                                ctx,
+                                            );
+                                        } else {
+                                            log::warn!(
+                                                "Rejecting a no-token agent prompt while retaining a setup-failed run (REMOTE-2661): server denied authorization or the call failed"
+                                            );
+                                            network.send_agent_prompt_rejection(
+                                                id,
+                                                participant_id,
+                                                AgentPromptFailureReason::InsufficientPermissions,
+                                            );
+                                        }
+                                    },
                                 );
                             });
                             return;
@@ -1392,41 +1519,7 @@ impl TerminalManager<TerminalView> {
                     }
                 }
 
-                // If a third-party CLI harness (e.g. Claude Code) is running, write
-                // the follow-up prompt directly to the PTY. The CLI handles it as
-                // interactive input. 
-                let terminal_view_id = terminal_view.id();
-                let has_active_cli_agent = CLIAgentSessionsModel::as_ref(ctx)
-                    .session(terminal_view_id)
-                    .is_some();
-                if has_active_cli_agent {
-                    // Reuse the rich input submit pipeline so agent-specific
-                    // strategies are applied. Bypasses the rich-input-UI side effects 
-  					// (telemetry, draft clear, editor buffer clear, pending-image consumption).
-                    terminal_view.update(ctx, |view, ctx| {
-                        view.submit_text_to_cli_agent_pty(request.prompt.clone(), ctx);
-                    });
-                    return;
-                }
-
-                // Execute the agent prompt in the Oz-harness case
-                terminal_view.update(ctx, |view, ctx| {
-                    // Restore the sharer's frozen visual state. The buffer is cleared by
-                    // system_clear_buffer when SentRequest fires from execute_agent_prompt_for_shared_session.
-                    view.input().update(ctx, |input, ctx| {
-                        input.unfreeze_agent_input(false, ctx);
-                    });
-
-                    view.ai_controller().update(ctx, |ai_controller, ctx| {
-                        ai_controller.execute_agent_prompt_for_shared_session(
-                            request.prompt.clone(),
-                            request.server_conversation_token,
-                            request.attachments.clone(),
-                            participant_id.clone(),
-                            ctx,
-                        );
-                    });
-                });
+                accept_agent_prompt(&terminal_view, request.clone(), participant_id.clone(), ctx);
             }
             NetworkEvent::LinkAccessLevelUpdateResponse { response } => {
                 terminal_view.update(ctx, |view, ctx| match response {
@@ -2078,3 +2171,7 @@ pub fn shutdown_all_pty_event_loops(ctx: &mut AppContext) {
         })
     })
 }
+
+#[cfg(test)]
+#[path = "terminal_view_adaptor_tests.rs"]
+mod tests;

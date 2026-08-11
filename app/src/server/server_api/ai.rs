@@ -103,6 +103,10 @@ use warp_graphql::queries::get_scheduled_agent_history::{
 use warp_graphql::queries::rerank_fragments::{
     RerankFragments, RerankFragmentsResult, RerankFragmentsVariables,
 };
+use warp_graphql::queries::setup_failure_debug_authorization::{
+    SetupFailureDebugAuthorization, SetupFailureDebugAuthorizationInput,
+    SetupFailureDebugAuthorizationResult, SetupFailureDebugAuthorizationVariables,
+};
 use warp_graphql::queries::sync_merkle_tree::{
     SyncMerkleTree, SyncMerkleTreeInput, SyncMerkleTreeResult, SyncMerkleTreeVariables,
 };
@@ -1433,6 +1437,19 @@ pub trait AIClient: 'static + Send + Sync {
         workload_token: String,
     ) -> anyhow::Result<Vec<GitCredential>, anyhow::Error>;
 
+    /// Authorizes a REMOTE-2661 debug agent prompt against a retained environment-setup-failure
+    /// session, called by the sharer with its own workload token and the requesting
+    /// participant's `firebase_uid` (resolved locally from the session-sharing presence list).
+    /// The server is the sole source of truth: any outcome other than
+    /// `Ok(true)` (an explicit denial, a `UserFacingError`, or a transport/network error) means
+    /// the caller must reject the prompt — there is no client-side fallback.
+    async fn setup_failure_debug_authorization(
+        &self,
+        task_id: AmbientAgentTaskId,
+        workload_token: String,
+        participant_firebase_uid: String,
+    ) -> anyhow::Result<bool, anyhow::Error>;
+
     async fn get_task_attachments(
         &self,
         task_id: String,
@@ -2685,6 +2702,37 @@ impl AIClient for ServerApi {
             }
             TaskGitCredentialsResult::Unknown => {
                 Err(anyhow!("Failed to fetch task git credentials"))
+            }
+        }
+    }
+
+    #[tracing::instrument(skip_all, err, fields(tags.cloud_agent = true))]
+    async fn setup_failure_debug_authorization(
+        &self,
+        task_id: AmbientAgentTaskId,
+        workload_token: String,
+        participant_firebase_uid: String,
+    ) -> anyhow::Result<bool, anyhow::Error> {
+        let variables = SetupFailureDebugAuthorizationVariables {
+            input: SetupFailureDebugAuthorizationInput {
+                task_id: task_id.into(),
+                workload_token,
+                participant_firebase_uid,
+            },
+            request_context: get_request_context(),
+        };
+        let operation = SetupFailureDebugAuthorization::build(variables);
+        let response = self.send_graphql_request(operation, None).await?;
+
+        match response.setup_failure_debug_authorization {
+            SetupFailureDebugAuthorizationResult::SetupFailureDebugAuthorizationOutput(output) => {
+                Ok(output.authorized)
+            }
+            SetupFailureDebugAuthorizationResult::UserFacingError(error) => {
+                Err(anyhow!(get_user_facing_error_message(error)))
+            }
+            SetupFailureDebugAuthorizationResult::Unknown => {
+                Err(anyhow!("Failed to authorize setup failure debug prompt"))
             }
         }
     }
