@@ -411,21 +411,6 @@ impl<T: Clone + Send + 'static> DebugWindowController<T> {
         }
         true
     }
-
-    /// Resolves the linger wait immediately, discarding any pin. Used for provider/session
-    /// shutdown, where the window closes without re-arming.
-    ///
-    /// Not yet wired into a production call site: today the sandbox-deadline `select!` in
-    /// `AgentDriver::run` already drops the whole task tree (including a pending linger wait)
-    /// on shutdown, which has the same practical effect. Kept as explicit, tested API surface
-    /// per the REMOTE-2661 spec so a future graceful-shutdown signal has a home to call into.
-    #[allow(dead_code)]
-    fn force_close(&self, value: T) {
-        if let Ok(mut turns) = self.active_turns.lock() {
-            turns.clear();
-        }
-        self.idle_timeout.end_run_now(value);
-    }
 }
 
 /// The status update reported for a run that failed during environment preparation.
@@ -3037,10 +3022,25 @@ impl AgentDriver {
         }
         self.debug_window_refresh_installed = true;
 
+        self.subscribe_to_viewer_input_refresh(ctx, move || idle_timeout.refresh());
+    }
+
+    /// Subscribes the terminal driver's viewer-input events to `refresh`, publishing the
+    /// resulting deadline whenever a keystroke moves it. Shared by [`Self::arm_debug_window`]
+    /// (a plain refresh via `IdleTimeoutSender::refresh`) and
+    /// [`Self::arm_setup_failure_debug_window`] (the pin-aware
+    /// `DebugWindowController::refresh_from_last_armed`, which is inert while a debug turn is
+    /// pinning the window) — the two differ only in which refresh function is pin-aware, not in
+    /// how the subscription or the resulting publish behaves.
+    fn subscribe_to_viewer_input_refresh(
+        &self,
+        ctx: &mut ModelContext<Self>,
+        refresh: impl Fn() -> Option<Duration> + Send + 'static,
+    ) {
         let terminal_driver = self.terminal_driver.clone();
         ctx.subscribe_to_model(&terminal_driver, move |me, _, event, ctx| {
             if matches!(event, TerminalDriverEvent::SharedSessionViewerInput)
-                && let Some(window) = idle_timeout.refresh()
+                && let Some(window) = refresh()
             {
                 log::debug!(
                     "Ambient agent idle lifecycle: event=idle_timeout_refreshed trigger=viewer_input"
@@ -3069,19 +3069,11 @@ impl AgentDriver {
         self.last_published_debug_deadline = None;
         self.publish_debug_window_deadline(window, None, ctx);
 
-        let terminal_driver = self.terminal_driver.clone();
         let terminal_surface_id = self.terminal_driver.as_ref(ctx).terminal_view().id();
 
         let viewer_input_controller = controller.clone();
-        ctx.subscribe_to_model(&terminal_driver, move |me, _, event, ctx| {
-            if matches!(event, TerminalDriverEvent::SharedSessionViewerInput)
-                && let Some(window) = viewer_input_controller.refresh_from_last_armed()
-            {
-                log::debug!(
-                    "Ambient agent idle lifecycle: event=idle_timeout_refreshed trigger=viewer_input"
-                );
-                me.publish_debug_window_deadline(window, None, ctx);
-            }
+        self.subscribe_to_viewer_input_refresh(ctx, move || {
+            viewer_input_controller.refresh_from_last_armed()
         });
 
         let history_model = BlocklistAIHistoryModel::handle(ctx);

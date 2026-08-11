@@ -724,46 +724,30 @@ fn debug_window_controller_finish_of_unknown_turn_is_a_no_op() {
 }
 
 #[test]
-fn debug_window_controller_refresh_from_last_armed_is_inert_while_pinned() {
+fn debug_window_controller_refresh_is_inert_while_pinned() {
+    // Both refresh entry points — the viewer-input keystroke path and the general re-arm path —
+    // must be no-ops while a debug turn is pinning the window, for the same reason: neither may
+    // move a deadline that finish_turn is about to race by re-arming the full interval anyway.
     let (tx, _rx) = oneshot::channel::<()>();
     let controller = DebugWindowController::new(IdleTimeoutSender::new(tx));
-    let turn_id = AIConversationId::new();
 
     controller.refresh_idle((), Duration::from_secs(60));
-    controller.pin_for_turn(turn_id);
-
+    controller.pin_for_turn(AIConversationId::new());
     assert_eq!(
         controller.refresh_from_last_armed(),
         None,
         "a viewer-input refresh must not move the deadline while a debug turn is pinning it"
     );
-}
 
-#[test]
-fn debug_window_controller_refresh_idle_is_inert_while_pinned() {
-    let (tx, _rx) = oneshot::channel::<()>();
-    let controller = DebugWindowController::new(IdleTimeoutSender::new(tx));
-    let turn_id = AIConversationId::new();
-
-    controller.pin_for_turn(turn_id);
+    let controller = DebugWindowController::new(IdleTimeoutSender::new(oneshot::channel::<()>().0));
+    controller.pin_for_turn(AIConversationId::new());
     assert!(
         !controller.refresh_idle((), Duration::from_millis(30)),
         "refreshing while pinned must not arm a deadline that finish_turn would then race"
     );
 }
 
-#[test]
-fn debug_window_controller_force_close_clears_pins_and_delivers_immediately() {
-    let (tx, mut rx) = oneshot::channel::<()>();
-    let controller = DebugWindowController::new(IdleTimeoutSender::new(tx));
-    controller.pin_for_turn(AIConversationId::new());
-
-    controller.force_close(());
-
-    assert_eq!(rx.try_recv().unwrap(), Some(()));
-}
-
-// ── Terminal-status idle window routing ──────────────────────────────────────────
+// ── Terminal-status idle window routing ────────────────────────────────────────────
 
 fn error_status() -> SDKConversationOutputStatus {
     SDKConversationOutputStatus::Error {
