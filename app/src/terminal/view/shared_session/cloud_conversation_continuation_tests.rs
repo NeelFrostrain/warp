@@ -543,6 +543,7 @@ fn environment_setup_failure_without_conversation_shows_tombstone_without_cta() 
             task.status_message = Some(TaskStatusMessage {
                 message: "Environment setup failed: Failed to run setup command: hi".to_string(),
                 error_code: Some(TaskStatusErrorCode::EnvironmentSetupFailed),
+                session_debug_until: None,
             });
             model.insert_task_for_test(task);
         });
@@ -577,6 +578,7 @@ fn environment_setup_failure_with_conversation_shows_continue_cta() {
             task.status_message = Some(TaskStatusMessage {
                 message: "Environment setup failed: Failed to run setup command: hi".to_string(),
                 error_code: Some(TaskStatusErrorCode::EnvironmentSetupFailed),
+                session_debug_until: None,
             });
             model.insert_task_for_test(task);
         });
@@ -915,6 +917,13 @@ fn routing_is_local_for_non_cloud_pane() {
 #[test]
 fn routing_is_live_remote_vm_for_active_viewer() {
     App::test((), |mut app| async move {
+        // Registered because `resolve_ai_query_routing` now checks setup-failure debug
+        // eligibility (which reads `AgentConversationsModel`) before the live-viewer branch,
+        // even though this task's absence from the model makes it ineligible either way. Disable
+        // AgentManagementView so the model doesn't try to wire up polling/subscriptions this
+        // minimal test doesn't otherwise set up.
+        let _agent_management_guard = FeatureFlag::AgentManagementView.override_enabled(false);
+        app.add_singleton_model(AgentConversationsModel::new);
         let model = ambient_pane_model(ambient_task_id(1), SharedSessionStatus::reader());
         app.update(|ctx| {
             assert_eq!(
@@ -950,6 +959,9 @@ fn routing_omits_task_id_for_non_ambient_shared_session_viewer() {
 #[test]
 fn routing_is_local_for_active_sharer_local_orchestration_child() {
     App::test((), |mut app| async move {
+        // See the comment in `routing_is_live_remote_vm_for_active_viewer`.
+        let _agent_management_guard = FeatureFlag::AgentManagementView.override_enabled(false);
+        app.add_singleton_model(AgentConversationsModel::new);
         let model = ambient_pane_model(ambient_task_id(1), SharedSessionStatus::ActiveSharer);
         app.update(|ctx| {
             assert_eq!(

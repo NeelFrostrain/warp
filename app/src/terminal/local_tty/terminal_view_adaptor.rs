@@ -28,6 +28,7 @@ use super::terminal_manager::{TerminalManager, TerminalSurfaceInit, TerminalSurf
 use crate::NetworkStatus;
 use crate::ai::active_agent_views_model::ActiveAgentViewsModel;
 use crate::ai::agent::conversation::AIConversation;
+use crate::ai::agent_conversations_model::AgentConversationsModel;
 use crate::ai::blocklist::agent_view::{AgentViewController, AgentViewControllerEvent};
 use crate::ai::blocklist::{
     BlocklistAIContextEvent, BlocklistAIContextModel, BlocklistAIControllerEvent,
@@ -1354,6 +1355,40 @@ impl TerminalManager<TerminalView> {
                             );
                         });
                         return;
+                    }
+
+                    // REMOTE-2661: a no-token prompt is how a debug conversation gets
+                    // bootstrapped into a retained environment-setup-failure session, but that
+                    // bootstrap must only ever arrive via the authenticated run follow-up
+                    // service (see `execute_agent_prompt_for_shared_session`'s tagging of the
+                    // resulting conversation). Reject a viewer's no-token prompt sent straight
+                    // over the session-sharing link instead, closing the bypass an old or
+                    // modified viewer could otherwise use to start a conversation and reopen
+                    // the run without follow-up authorization.
+                    if request.server_conversation_token.is_none() {
+                        let is_retained_setup_failure_debug_session = model
+                            .lock()
+                            .ambient_agent_task_id()
+                            .is_some_and(|task_id| {
+                                AgentConversationsModel::as_ref(ctx)
+                                    .get_task_data(&task_id)
+                                    .is_some_and(|task| {
+                                        task.is_open_for_setup_failure_debug_bootstrap()
+                                    })
+                            });
+                        if is_retained_setup_failure_debug_session {
+                            log::warn!(
+                                "Rejecting a no-token agent prompt from a viewer while retaining a setup-failed run (REMOTE-2661); it must go through the authenticated follow-up service instead"
+                            );
+                            network.update(ctx, |network, _ctx| {
+                                network.send_agent_prompt_rejection(
+                                    id.clone(),
+                                    participant_id.clone(),
+                                    AgentPromptFailureReason::InsufficientPermissions,
+                                );
+                            });
+                            return;
+                        }
                     }
                 }
 

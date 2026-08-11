@@ -916,7 +916,26 @@ impl AmbientAgentViewModel {
             log::warn!("Attempted to submit cloud follow-up while HandoffCloudCloud is disabled");
             return;
         }
+        self.submit_run_followup_unchecked(prompt, ctx);
+    }
 
+    /// Submits a follow-up through the run follow-up service, the same way as
+    /// [`Self::submit_cloud_followup`], but without its `HandoffCloudCloud` gate.
+    ///
+    /// Used for the REMOTE-2661 retained setup-failure debug route
+    /// (`AIQueryRouting::RetainedSetupFailureDebug`): every authenticated follow-up origin uses
+    /// this one retained-session route regardless of whether cloud-to-cloud handoff has rolled
+    /// out, since the server decides whether the follow-up bootstraps a debug conversation into
+    /// the retained session or starts a new cloud VM.
+    pub fn submit_setup_failure_debug_followup(
+        &mut self,
+        prompt: String,
+        ctx: &mut ModelContext<Self>,
+    ) {
+        self.submit_run_followup_unchecked(prompt, ctx);
+    }
+
+    fn submit_run_followup_unchecked(&mut self, prompt: String, ctx: &mut ModelContext<Self>) {
         let Some(task_id) = self.task_id else {
             log::warn!("Attempted to submit cloud follow-up without an ambient task ID");
             return;

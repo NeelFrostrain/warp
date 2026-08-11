@@ -1,3 +1,4 @@
+use chrono::Utc;
 use warp_cli::agent::Harness;
 use warpui::{AppContext, EntityId, ModelHandle, SingletonEntity};
 
@@ -20,8 +21,17 @@ use crate::workspaces::user_workspaces::UserWorkspaces;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum TombstoneCta {
-    ContinueLocally { conversation_id: AIConversationId },
-    ContinueInCloud { task_id: AmbientAgentTaskId },
+    ContinueLocally {
+        conversation_id: AIConversationId,
+    },
+    ContinueInCloud {
+        task_id: AmbientAgentTaskId,
+    },
+    /// Enables the tombstone's agent input for an authorized caller to debug a retained
+    /// environment-setup failure (REMOTE-2661), instead of a plain CTA button.
+    DebugRetainedSetupFailure {
+        task_id: AmbientAgentTaskId,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -55,6 +65,12 @@ pub(crate) enum AIQueryRouting {
     /// Continues on the local machine. Covers ordinary local agent panes and local ambient sharers
     /// (e.g. `run_agents(local)` orchestration children, `/remote-control` of a local session).
     Local,
+    /// A retained environment-setup-failure session with an open debug window (REMOTE-2661): the
+    /// follow-up must route through the authenticated run follow-up service so the server's
+    /// bootstrap-or-continue eligibility check applies, and must never fall through to the
+    /// direct live-viewer prompt path or the local agent — both would bypass follow-up
+    /// authorization and let the debug conversation's own lifecycle report reopen the run.
+    RetainedSetupFailureDebug { task_id: AmbientAgentTaskId },
 }
 
 impl AIQueryRouting {
@@ -106,7 +122,9 @@ pub(in crate::terminal::view) fn resolve_cloud_conversation_continuation_ui_stat
             .as_ref()
             .is_some_and(|status_message| status_message.is_environment_setup_failure());
     if is_environment_setup_failure && task.conversation_id().is_none() {
-        return Ok(CloudConversationContinuationUiState::Tombstone { cta: None });
+        let cta = is_retained_setup_failure_debug_editable(&task, app)
+            .then_some(TombstoneCta::DebugRetainedSetupFailure { task_id });
+        return Ok(CloudConversationContinuationUiState::Tombstone { cta });
     }
     let conversation_token = task
         .conversation_id()
@@ -165,6 +183,18 @@ pub(crate) fn resolve_ai_query_routing(
         .and_then(|model| model.as_ref(app).task_id())
         .or_else(|| terminal_model.ambient_agent_task_id());
 
+    // A retained setup-failure debug session takes priority over ordinary live-viewer routing:
+    // an already-attached viewer must still submit through the authenticated follow-up service
+    // rather than the direct viewer prompt path, closing the bypass where a no-token prompt sent
+    // straight to the sharer could start a conversation and reopen the run (the exact bypass
+    // `execute_agent_prompt_for_shared_session` used to allow).
+    if let Some(task_id) = ambient_agent_task_id
+        && let Some(task) = AgentConversationsModel::as_ref(app).get_task_data(&task_id)
+        && is_retained_setup_failure_debug_editable(&task, app)
+    {
+        return AIQueryRouting::RetainedSetupFailureDebug { task_id };
+    }
+
     // A live shared-session viewer forwards its follow-up to the sharer via the viewer prompt path,
     // whether the shared session is an ambient cloud run or a shared local session. `is_executor`
     // tells the submission router whether this viewer may actually submit; `ambient_agent_task_id`
@@ -220,6 +250,28 @@ pub(crate) fn resolve_ai_query_routing(
         // Any other outcome on an existing cloud task is non-resumable here: read-only, never local.
         Ok(_) | Err(_) => AIQueryRouting::UnconnectedReadOnly,
     }
+}
+
+/// Whether `task`'s retained setup-failure tombstone should present an editable agent input for
+/// the current principal, rather than the ordinary no-CTA read-only tombstone (REMOTE-2661).
+///
+/// Requires (a) the client-side eligibility proxy (failure-like state, `ENVIRONMENT_SETUP_FAILED`,
+/// no conversation yet — see `AmbientAgentTask::is_open_for_setup_failure_debug_bootstrap`), (b) a
+/// debug window the server has reported as still open, and (c) the same follow-up authorization
+/// used for an ordinary owned cloud continuation. The server independently re-verifies all of
+/// this before actually accepting the follow-up; this only decides what the client presents.
+fn is_retained_setup_failure_debug_editable(task: &AmbientAgentTask, app: &AppContext) -> bool {
+    if !task.is_open_for_setup_failure_debug_bootstrap() {
+        return false;
+    }
+    if !task
+        .status_message
+        .as_ref()
+        .is_some_and(|status_message| status_message.is_debug_window_open(Utc::now()))
+    {
+        return false;
+    }
+    task_creator_access(task, app) == ConversationAccess::Edit
 }
 
 fn continuation_ui_state_for_harness_and_access(

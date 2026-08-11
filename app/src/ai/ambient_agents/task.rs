@@ -290,6 +290,25 @@ impl AmbientAgentTask {
         self.conversation_id.as_deref()
     }
 
+    /// Whether this run is a still-open, no-conversation-yet environment-setup-failure retained
+    /// session: a client-side proxy for the server's REMOTE-2661 eligibility predicate.
+    ///
+    /// This cannot fully replicate the server's check: the client has no field for the
+    /// server-internal retained-execution ID, the open debug deadline, or a sharer capability
+    /// advertisement, none of which are exposed to it today. The server independently
+    /// re-verifies eligibility before accepting a debug follow-up or letting an `IN_PROGRESS`
+    /// report from it reopen the run (see `BeginTaskProgress`'s retained-execution guard), so
+    /// this helper only decides what the *client* should present as editable and where it
+    /// should route a submission — never what is safe to allow.
+    pub fn is_open_for_setup_failure_debug_bootstrap(&self) -> bool {
+        self.state.is_failure_like()
+            && self
+                .status_message
+                .as_ref()
+                .is_some_and(TaskStatusMessage::is_environment_setup_failure)
+            && self.conversation_id().is_none()
+    }
+
     /// Returns true when this task's source must not accept user-triggered cloud follow-ups.
     pub fn blocks_cloud_followups(&self) -> bool {
         self.source
@@ -526,6 +545,12 @@ pub struct TaskStatusMessage {
     pub message: String,
     #[serde(default, alias = "errorCode")]
     pub error_code: Option<TaskStatusErrorCode>,
+    /// The deadline of an open post-failure debug window (REMOTE-2208/REMOTE-2661), if the
+    /// server is currently holding one open for this run. `#[serde(default)]` so an older
+    /// server that never sends the field, or a run with no open window, deserializes to `None`
+    /// — which callers must treat as "no debug window is known to be open", not as an error.
+    #[serde(default)]
+    pub session_debug_until: Option<DateTime<Utc>>,
 }
 
 #[derive(Clone, Serialize, Deserialize, Debug, PartialEq, Eq)]
@@ -548,6 +573,14 @@ impl TaskStatusMessage {
         self.error_code
             .as_ref()
             .is_some_and(TaskStatusErrorCode::is_environment_setup_failure)
+    }
+
+    /// Whether the server has reported a post-failure debug window that has not yet passed
+    /// `now`. `false` for a run with no reported window (including an older server that never
+    /// sends `session_debug_until`) — callers must fail closed rather than assume an open window.
+    pub fn is_debug_window_open(&self, now: DateTime<Utc>) -> bool {
+        self.session_debug_until
+            .is_some_and(|deadline| deadline > now)
     }
 }
 

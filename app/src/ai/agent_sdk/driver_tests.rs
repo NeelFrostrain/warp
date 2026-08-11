@@ -28,13 +28,14 @@ use warp_util::standardized_path::StandardizedPath;
 use warpui::{App, SingletonEntity as _};
 
 use super::{
-    AgentDriver, AgentDriverError, CLIAgentSessionStatus, IdleTimeoutSender,
+    AgentDriver, AgentDriverError, CLIAgentSessionStatus, DebugWindowController, IdleTimeoutSender,
     LEGACY_OZ_PARENT_LISTENER_MANAGED_EXTERNALLY_ENV, LEGACY_OZ_PARENT_STATE_ROOT_ENV,
     OZ_MESSAGE_LISTENER_MANAGED_EXTERNALLY_ENV, OZ_MESSAGE_LISTENER_STATE_ROOT_ENV,
     PlatformErrorCode, SDKConversationOutputStatus, build_secret_env_vars,
     idle_window_for_cli_session_status, idle_window_for_terminal_status,
     setup_failure_status_update, terminal_status_log_outcome,
 };
+use crate::ai::agent::conversation::AIConversationId;
 use crate::ai::agent::task::TaskId;
 use crate::ai::agent::{
     AIAgentActionResult, AIAgentActionResultType, AIAgentInput, AIAgentOutput,
@@ -633,6 +634,133 @@ fn idle_timeout_sender_complete_with_optional_idle_some_then_cancel_invalidates_
     // Sender was never consumed by the cancelled timer, so the channel is
     // still open but empty.
     assert_eq!(rx.try_recv().unwrap(), None);
+}
+
+// ── DebugWindowController tests ───────────────────────────────────────────────────
+
+#[test]
+fn debug_window_controller_pin_blocks_refresh_and_finish_rearms() {
+    let (tx, mut rx) = oneshot::channel::<()>();
+    let controller = DebugWindowController::new(IdleTimeoutSender::new(tx));
+    let turn_id = AIConversationId::new();
+
+    // A short window so an unpinned controller would fire almost immediately.
+    controller.refresh_idle((), Duration::from_millis(30));
+    assert!(
+        controller.pin_for_turn(turn_id),
+        "first pin must be accepted"
+    );
+
+    std::thread::sleep(Duration::from_millis(80));
+    assert_eq!(
+        rx.try_recv().unwrap(),
+        None,
+        "a pinned debug turn must not let the idle window expire, however long it runs"
+    );
+
+    assert!(
+        controller.finish_turn(turn_id, (), Duration::from_millis(30)),
+        "finishing a tracked turn must report a real transition"
+    );
+    std::thread::sleep(Duration::from_millis(80));
+    assert_eq!(
+        rx.try_recv().unwrap(),
+        Some(()),
+        "finishing the last active turn must re-arm the full idle window"
+    );
+}
+
+#[test]
+fn debug_window_controller_duplicate_pin_is_idempotent() {
+    let (tx, _rx) = oneshot::channel::<()>();
+    let controller = DebugWindowController::new(IdleTimeoutSender::new(tx));
+    let turn_id = AIConversationId::new();
+
+    assert!(
+        controller.pin_for_turn(turn_id),
+        "first pin is a real transition"
+    );
+    assert!(
+        !controller.pin_for_turn(turn_id),
+        "a duplicate pin for the same turn id must be a no-op"
+    );
+}
+
+#[test]
+fn debug_window_controller_duplicate_finish_is_idempotent() {
+    let (tx, mut rx) = oneshot::channel::<()>();
+    let controller = DebugWindowController::new(IdleTimeoutSender::new(tx));
+    let turn_id = AIConversationId::new();
+
+    controller.pin_for_turn(turn_id);
+    assert!(controller.finish_turn(turn_id, (), Duration::from_millis(30)));
+    assert!(
+        !controller.finish_turn(turn_id, (), Duration::from_millis(30)),
+        "a duplicate terminal event for the same turn id must be a no-op"
+    );
+
+    std::thread::sleep(Duration::from_millis(80));
+    assert_eq!(
+        rx.try_recv().unwrap(),
+        Some(()),
+        "the single real finish must still re-arm exactly one full window"
+    );
+}
+
+#[test]
+fn debug_window_controller_finish_of_unknown_turn_is_a_no_op() {
+    let (tx, mut rx) = oneshot::channel::<()>();
+    let controller = DebugWindowController::new(IdleTimeoutSender::new(tx));
+
+    controller.refresh_idle((), Duration::from_millis(30));
+    assert!(
+        !controller.finish_turn(AIConversationId::new(), (), Duration::from_millis(30)),
+        "finishing a turn id that was never pinned must be a no-op"
+    );
+
+    // The unrelated finish_turn call must not have disturbed the already-armed window.
+    std::thread::sleep(Duration::from_millis(80));
+    assert_eq!(rx.try_recv().unwrap(), Some(()));
+}
+
+#[test]
+fn debug_window_controller_refresh_from_last_armed_is_inert_while_pinned() {
+    let (tx, _rx) = oneshot::channel::<()>();
+    let controller = DebugWindowController::new(IdleTimeoutSender::new(tx));
+    let turn_id = AIConversationId::new();
+
+    controller.refresh_idle((), Duration::from_secs(60));
+    controller.pin_for_turn(turn_id);
+
+    assert_eq!(
+        controller.refresh_from_last_armed(),
+        None,
+        "a viewer-input refresh must not move the deadline while a debug turn is pinning it"
+    );
+}
+
+#[test]
+fn debug_window_controller_refresh_idle_is_inert_while_pinned() {
+    let (tx, _rx) = oneshot::channel::<()>();
+    let controller = DebugWindowController::new(IdleTimeoutSender::new(tx));
+    let turn_id = AIConversationId::new();
+
+    controller.pin_for_turn(turn_id);
+    assert!(
+        !controller.refresh_idle((), Duration::from_millis(30)),
+        "refreshing while pinned must not arm a deadline that finish_turn would then race"
+    );
+}
+
+#[test]
+fn debug_window_controller_force_close_clears_pins_and_delivers_immediately() {
+    let (tx, mut rx) = oneshot::channel::<()>();
+    let controller = DebugWindowController::new(IdleTimeoutSender::new(tx));
+    controller.pin_for_turn(AIConversationId::new());
+
+    controller.force_close(());
+
+    assert_eq!(rx.try_recv().unwrap(), Some(()));
 }
 
 // ── Terminal-status idle window routing ──────────────────────────────────────────

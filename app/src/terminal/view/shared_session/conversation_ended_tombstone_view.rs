@@ -55,7 +55,14 @@ struct TombstoneDisplayData {
 
 #[derive(Debug, Clone)]
 pub enum ConversationEndedTombstoneEvent {
-    ContinueInCloud { task_id: AmbientAgentTaskId },
+    ContinueInCloud {
+        task_id: AmbientAgentTaskId,
+    },
+    /// The user clicked the tombstone's debug button for a retained environment-setup-failure
+    /// session (REMOTE-2661).
+    DebugRetainedSetupFailure {
+        task_id: AmbientAgentTaskId,
+    },
 }
 
 impl TombstoneDisplayData {
@@ -159,6 +166,7 @@ pub struct ConversationEndedTombstoneView {
     display_data: TombstoneDisplayData,
     artifact_buttons_view: ViewHandle<ArtifactButtonsRow>,
     continue_in_cloud_button: Option<ViewHandle<ActionButton>>,
+    debug_retained_setup_failure_button: Option<ViewHandle<ActionButton>>,
     #[cfg(not(target_family = "wasm"))]
     continue_locally_button: Option<ViewHandle<ActionButton>>,
     #[cfg(target_family = "wasm")]
@@ -208,7 +216,27 @@ impl ConversationEndedTombstoneView {
                         })
                 }))
             }
-            Some(TombstoneCta::ContinueLocally { .. }) | None => None,
+            Some(TombstoneCta::ContinueLocally { .. })
+            | Some(TombstoneCta::DebugRetainedSetupFailure { .. })
+            | None => None,
+        };
+
+        let debug_retained_setup_failure_button = match tombstone_cta {
+            Some(TombstoneCta::DebugRetainedSetupFailure { task_id }) => {
+                Some(ctx.add_typed_action_view(move |_| {
+                    ActionButton::new("Debug", PrimaryTheme)
+                        .with_tooltip("Ask an agent to debug this session")
+                        .on_click(move |ctx| {
+                            ctx.dispatch_typed_action(
+                                ConversationEndedTombstoneAction::DebugRetainedSetupFailure {
+                                    task_id,
+                                },
+                            );
+                        })
+                }))
+            }
+            Some(TombstoneCta::ContinueInCloud { .. } | TombstoneCta::ContinueLocally { .. })
+            | None => None,
         };
 
         #[cfg(not(target_family = "wasm"))]
@@ -224,7 +252,9 @@ impl ConversationEndedTombstoneView {
                         })
                 }))
             }
-            Some(TombstoneCta::ContinueInCloud { .. }) | None => None,
+            Some(TombstoneCta::ContinueInCloud { .. })
+            | Some(TombstoneCta::DebugRetainedSetupFailure { .. })
+            | None => None,
         };
 
         // In wasm, continuing locally is impossible so we instead
@@ -251,6 +281,7 @@ impl ConversationEndedTombstoneView {
             display_data,
             artifact_buttons_view,
             continue_in_cloud_button,
+            debug_retained_setup_failure_button,
             #[cfg(not(target_family = "wasm"))]
             continue_locally_button,
             #[cfg(target_family = "wasm")]
@@ -495,6 +526,13 @@ impl ConversationEndedTombstoneView {
             row.add_child(ChildView::new(continue_in_cloud_button).finish());
             has_button = true;
         }
+        if is_any_ai_enabled
+            && let Some(debug_retained_setup_failure_button) =
+                &self.debug_retained_setup_failure_button
+        {
+            row.add_child(ChildView::new(debug_retained_setup_failure_button).finish());
+            has_button = true;
+        }
         #[cfg(not(target_family = "wasm"))]
         {
             if let Some(continue_locally_button) = &self.continue_locally_button {
@@ -543,10 +581,19 @@ impl ConversationEndedTombstoneView {
     pub(in crate::terminal::view) fn has_continue_in_cloud_button_for_test(&self) -> bool {
         self.continue_in_cloud_button.is_some()
     }
+
+    pub(in crate::terminal::view) fn has_debug_retained_setup_failure_button_for_test(
+        &self,
+    ) -> bool {
+        self.debug_retained_setup_failure_button.is_some()
+    }
 }
 #[derive(Debug, Clone)]
 pub enum ConversationEndedTombstoneAction {
     ContinueInCloud {
+        task_id: AmbientAgentTaskId,
+    },
+    DebugRetainedSetupFailure {
         task_id: AmbientAgentTaskId,
     },
     #[cfg(not(target_family = "wasm"))]
@@ -640,6 +687,11 @@ impl TypedActionView for ConversationEndedTombstoneView {
                     ctx
                 );
                 ctx.emit(ConversationEndedTombstoneEvent::ContinueInCloud { task_id: *task_id });
+            }
+            ConversationEndedTombstoneAction::DebugRetainedSetupFailure { task_id } => {
+                ctx.emit(ConversationEndedTombstoneEvent::DebugRetainedSetupFailure {
+                    task_id: *task_id,
+                });
             }
             #[cfg(not(target_family = "wasm"))]
             ConversationEndedTombstoneAction::ContinueLocally(conversation_id) => {

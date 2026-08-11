@@ -1,10 +1,14 @@
 use chrono::Utc;
+use warpui::App;
 
-use super::TombstoneDisplayData;
+use super::{ConversationEndedTombstoneView, TombstoneDisplayData};
 use crate::ai::ambient_agents::task::{RequestUsage, TaskPrincipalInfo, TaskStatusMessage};
-use crate::ai::ambient_agents::{AmbientAgentTask, AmbientAgentTaskState};
+use crate::ai::ambient_agents::{AmbientAgentTask, AmbientAgentTaskId, AmbientAgentTaskState};
 use crate::ai::artifacts::Artifact;
 use crate::ai::blocklist::format_credits;
+use crate::terminal::view::shared_session::cloud_conversation_continuation::TombstoneCta;
+use crate::test_util::add_window_with_terminal;
+use crate::test_util::terminal::initialize_app_for_terminal_view;
 
 const INFERENCE_COST: f64 = 1.5;
 const COMPUTE_COST: f64 = 3.0;
@@ -70,6 +74,7 @@ fn task_failure_status_message_overrides_conversation_error() {
     task.status_message = Some(TaskStatusMessage {
         message: "task failed".to_string(),
         error_code: None,
+        session_debug_until: None,
     });
     let mut data = TombstoneDisplayData {
         is_error: true,
@@ -167,4 +172,34 @@ fn empty_task_artifacts_preserve_conversation_artifacts() {
     data.enrich_from_task(task);
 
     assert_eq!(data.artifacts, conversation_artifacts);
+}
+
+/// The REMOTE-2661 debug CTA renders as its own dedicated button, distinct from (and mutually
+/// exclusive with) the ordinary `ContinueInCloud`/`ContinueLocally` tombstone CTAs.
+#[test]
+fn debug_retained_setup_failure_cta_shows_only_the_debug_button() {
+    App::test((), |mut app| async move {
+        initialize_app_for_terminal_view(&mut app);
+        let terminal_view = add_window_with_terminal(&mut app, None);
+        let window_id = app.read(|ctx| terminal_view.window_id(ctx));
+        let task_id: AmbientAgentTaskId = "550e8400-e29b-41d4-a716-000000005099"
+            .parse()
+            .expect("valid task id");
+
+        let tombstone = app.add_typed_action_view(window_id, |ctx| {
+            ConversationEndedTombstoneView::new(
+                ctx,
+                terminal_view.id(),
+                None,
+                Some(TombstoneCta::DebugRetainedSetupFailure { task_id }),
+            )
+        });
+
+        tombstone.read(&app, |view, _| {
+            assert!(view.has_debug_retained_setup_failure_button_for_test());
+            assert!(!view.has_continue_in_cloud_button_for_test());
+            #[cfg(not(target_family = "wasm"))]
+            assert!(!view.has_continue_locally_button_for_test());
+        });
+    });
 }

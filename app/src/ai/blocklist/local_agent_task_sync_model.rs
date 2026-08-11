@@ -232,9 +232,22 @@ impl LocalAgentTaskSyncModel {
                     }
                 }
 
-                let (task_state, status_message) = map_conversation_status(conversation);
+                // A debug conversation bootstrapped into a retained setup-failure session must
+                // keep reporting its conversation ID (live injection and transcript APIs depend
+                // on it) without deriving task state or a status message from its own status —
+                // that would overwrite the original failure record. See
+                // `TaskSyncMode::PreserveTerminalSetupFailure`.
+                let (task_state, status_message) = if conversation
+                    .task_sync_mode()
+                    .suppresses_task_lifecycle_updates()
+                {
+                    (None, None)
+                } else {
+                    let (task_state, status_message) = map_conversation_status(conversation);
+                    (Some(task_state), status_message)
+                };
                 Some(LocalTaskUpdate {
-                    task_state: Some(task_state),
+                    task_state,
                     server_conversation_token: conversation
                         .server_conversation_token()
                         .map(|token| token.as_str().to_string()),

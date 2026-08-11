@@ -62,8 +62,8 @@ use crate::ai::blocklist::orchestration_event_streamer::{
     register_agent_event_consumer, unregister_agent_event_consumer,
 };
 use crate::ai::blocklist::{
-    BlocklistAIHistoryEvent, BlocklistAIHistoryModel, BlocklistAIPermissions, FinalizeReason,
-    finalize_recording_for_conversation,
+    BlocklistAIHistoryEvent, BlocklistAIHistoryModel, BlocklistAIPermissions,
+    ConversationStatusUpdate, FinalizeReason, finalize_recording_for_conversation,
 };
 use crate::ai::cloud_environments::{
     AmbientAgentEnvironment, CloudAmbientAgentEnvironment, GithubRepo, SourceRepo,
@@ -314,6 +314,117 @@ impl<T: Clone + Send + 'static> IdleTimeoutSender<T> {
         };
         self.end_run_after(window, value);
         Some(window)
+    }
+}
+
+/// Owns the post-failure debug window's idle deadline and the set of debug-turn conversations
+/// currently pinning it open, for the retained setup-failure lingering path (REMOTE-2661).
+///
+/// A "turn" is a debug conversation (identified by its [`AIConversationId`]) with an
+/// in-progress exchange running against the retained session. The idle timer is free to expire
+/// only when no turn is pinning it. Idempotent by turn ID: pinning an already-pinned turn, or
+/// finishing an unpinned/unknown turn, is a no-op — duplicate conversation-status events can
+/// never leak a pin or shorten the window.
+///
+/// Distinct from [`arm_debug_window`](AgentDriver::arm_debug_window), which handles an
+/// *existing* Oz/CLI conversation's own terminal failure: that case has exactly one
+/// conversation and no notion of a later debug turn being bootstrapped into it.
+struct DebugWindowController<T: Clone + Send + 'static> {
+    idle_timeout: IdleTimeoutSender<T>,
+    active_turns: Arc<Mutex<HashSet<AIConversationId>>>,
+}
+
+// Hand-written for the same reason as `IdleTimeoutSender`: every field is a shared handle, so
+// clones drive the same underlying state.
+impl<T: Clone + Send + 'static> Clone for DebugWindowController<T> {
+    fn clone(&self) -> Self {
+        Self {
+            idle_timeout: self.idle_timeout.clone(),
+            active_turns: Arc::clone(&self.active_turns),
+        }
+    }
+}
+
+impl<T: Clone + Send + 'static> DebugWindowController<T> {
+    fn new(idle_timeout: IdleTimeoutSender<T>) -> Self {
+        Self {
+            idle_timeout,
+            active_turns: Arc::new(Mutex::new(HashSet::new())),
+        }
+    }
+
+    fn is_pinned(&self) -> bool {
+        self.active_turns
+            .lock()
+            .is_ok_and(|turns| !turns.is_empty())
+    }
+
+    /// Arms or moves the idle deadline. No-op while a debug turn is pinning the window, since
+    /// the deadline must not slide out from under a turn that is about to finish and re-arm it
+    /// with the full interval anyway. Returns whether the deadline was actually armed.
+    fn refresh_idle(&self, value: T, window: Duration) -> bool {
+        if self.is_pinned() {
+            return false;
+        }
+        self.idle_timeout.arm_refreshable(window, value);
+        true
+    }
+
+    /// Pushes a previously armed deadline out by its original window, as long as the window
+    /// isn't pinned. Used for keystroke-level viewer-input refreshes.
+    fn refresh_from_last_armed(&self) -> Option<Duration> {
+        if self.is_pinned() {
+            return None;
+        }
+        self.idle_timeout.refresh()
+    }
+
+    /// Cancels the idle expiry while at least one debug turn is active. Returns `true` only when
+    /// this call actually added a new active turn (a duplicate call with the same turn ID is a
+    /// no-op).
+    fn pin_for_turn(&self, turn_id: AIConversationId) -> bool {
+        let Ok(mut turns) = self.active_turns.lock() else {
+            return false;
+        };
+        let was_empty = turns.is_empty();
+        let inserted = turns.insert(turn_id);
+        drop(turns);
+        if was_empty && inserted {
+            self.idle_timeout.cancel_idle_timeout();
+        }
+        inserted
+    }
+
+    /// Removes the pin for `turn_id`, re-arming a full idle window once the last active turn
+    /// ends. Returns `false` for a duplicate or unknown turn ID (idempotent).
+    fn finish_turn(&self, turn_id: AIConversationId, value: T, window: Duration) -> bool {
+        let Ok(mut turns) = self.active_turns.lock() else {
+            return false;
+        };
+        if !turns.remove(&turn_id) {
+            return false;
+        }
+        let now_empty = turns.is_empty();
+        drop(turns);
+        if now_empty {
+            self.idle_timeout.arm_refreshable(window, value);
+        }
+        true
+    }
+
+    /// Resolves the linger wait immediately, discarding any pin. Used for provider/session
+    /// shutdown, where the window closes without re-arming.
+    ///
+    /// Not yet wired into a production call site: today the sandbox-deadline `select!` in
+    /// `AgentDriver::run` already drops the whole task tree (including a pending linger wait)
+    /// on shutdown, which has the same practical effect. Kept as explicit, tested API surface
+    /// per the REMOTE-2661 spec so a future graceful-shutdown signal has a home to call into.
+    #[allow(dead_code)]
+    fn force_close(&self, value: T) {
+        if let Ok(mut turns) = self.active_turns.lock() {
+            turns.clear();
+        }
+        self.idle_timeout.end_run_now(value);
     }
 }
 
@@ -2880,8 +2991,9 @@ impl AgentDriver {
         Self::report_failure_before_lingering(foreground, stage, error).await;
 
         let (tx, rx) = oneshot::channel::<()>();
+        let controller = DebugWindowController::new(IdleTimeoutSender::new(tx));
         let armed = foreground.spawn(move |me, ctx| {
-            me.arm_debug_window(IdleTimeoutSender::new(tx), (), window, ctx);
+            me.arm_setup_failure_debug_window(controller, window, ctx);
         });
         if let Err(error) = armed.await {
             log::warn!("Could not arm the post-failure debug window: {error}");
@@ -2933,6 +3045,81 @@ impl AgentDriver {
                 );
                 me.publish_debug_window_deadline(window, ctx);
             }
+        });
+    }
+
+    /// Arms the post-failure debug window for a retained environment-setup failure and installs
+    /// the subscriptions that keep it alive across a debug turn (REMOTE-2661).
+    ///
+    /// Unlike [`Self::arm_debug_window`] (used when an *existing* Oz/CLI conversation itself
+    /// fails), no conversation exists yet here: the window must survive a brand-new debug
+    /// conversation being bootstrapped into the retained session, with no viewer input of its
+    /// own to refresh it. Viewer keystrokes still refresh the window exactly as before; a debug
+    /// conversation additionally pins it for the duration of each turn (accepted → terminal) and
+    /// re-arms the full interval when the turn ends.
+    fn arm_setup_failure_debug_window(
+        &mut self,
+        controller: DebugWindowController<()>,
+        window: Duration,
+        ctx: &mut ModelContext<Self>,
+    ) {
+        controller.refresh_idle((), window);
+        self.last_published_debug_deadline = None;
+        self.publish_debug_window_deadline(window, ctx);
+
+        let terminal_driver = self.terminal_driver.clone();
+        let terminal_surface_id = self.terminal_driver.as_ref(ctx).terminal_view().id();
+
+        let viewer_input_controller = controller.clone();
+        ctx.subscribe_to_model(&terminal_driver, move |me, _, event, ctx| {
+            if matches!(event, TerminalDriverEvent::SharedSessionViewerInput)
+                && let Some(window) = viewer_input_controller.refresh_from_last_armed()
+            {
+                log::debug!(
+                    "Ambient agent idle lifecycle: event=idle_timeout_refreshed trigger=viewer_input"
+                );
+                me.publish_debug_window_deadline(window, ctx);
+            }
+        });
+
+        let history_model = BlocklistAIHistoryModel::handle(ctx);
+        ctx.subscribe_to_model(&history_model, move |me, _, event, ctx| {
+            let BlocklistAIHistoryEvent::UpdatedConversationStatus {
+                conversation_id,
+                terminal_surface_id: event_terminal_surface_id,
+                update: ConversationStatusUpdate::Changed { .. },
+                new_status,
+            } = event
+            else {
+                return;
+            };
+            if *event_terminal_surface_id != terminal_surface_id {
+                return;
+            }
+
+            if new_status.is_in_progress() {
+                // Accepted: refresh the full window first (bumps the displayed deadline), then
+                // pin it, since the turn may run long past that refreshed window.
+                let refreshed = controller.refresh_idle((), window);
+                let newly_pinned = controller.pin_for_turn(*conversation_id);
+                if refreshed || newly_pinned {
+                    log::info!(
+                        "Ambient agent idle lifecycle: event=debug_turn_accepted conversation_id={conversation_id:?}"
+                    );
+                    me.last_published_debug_deadline = None;
+                    me.publish_debug_window_deadline(window, ctx);
+                }
+            } else if (new_status.is_done() || new_status.is_blocked())
+                && controller.finish_turn(*conversation_id, (), window)
+            {
+                log::info!(
+                    "Ambient agent idle lifecycle: event=debug_turn_finished conversation_id={conversation_id:?}"
+                );
+                me.last_published_debug_deadline = None;
+                me.publish_debug_window_deadline(window, ctx);
+            }
+            // WaitingForEvents / TransientError are quiescent-but-not-terminal: the turn stays
+            // pinned without a fresh accept or finish transition.
         });
     }
 

@@ -1044,6 +1044,13 @@ pub enum Event {
     SubmitCloudFollowup {
         prompt: String,
     },
+    /// A retained environment-setup-failure debug tombstone (REMOTE-2661), or an already
+    /// attached live viewer of one, is requesting to submit a debug follow-up through the
+    /// authenticated run follow-up service, never the direct viewer prompt path.
+    SubmitSetupFailureDebugFollowup {
+        task_id: crate::ai::ambient_agents::AmbientAgentTaskId,
+        prompt: String,
+    },
     /// A viewer in a shared session is requesting to cancel the active agent conversation.
     CancelSharedSessionConversation {
         server_conversation_token: ServerConversationToken,
@@ -4280,6 +4287,14 @@ impl Input {
                     "This cloud conversation can't continue on your local machine.",
                     ctx,
                 );
+                true
+            }
+            AIQueryRouting::RetainedSetupFailureDebug { task_id } => {
+                // Every authenticated origin — the tombstone's own input and an already-attached
+                // live viewer alike — converges on the same authenticated follow-up service call,
+                // never the direct viewer prompt path or the local agent (REMOTE-2661).
+                let prompt = self.editor.as_ref(ctx).buffer_text(ctx).trim().to_owned();
+                ctx.emit(Event::SubmitSetupFailureDebugFollowup { task_id, prompt });
                 true
             }
         }
