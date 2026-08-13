@@ -42,7 +42,8 @@ use crate::server::cloud_objects::update_manager::UpdateManager;
 use crate::server::ids::{ServerId, SyncId};
 use crate::server::server_api::ServerApiProvider;
 use crate::server::server_api::ai::{
-    AgentConfigSnapshot, AmbientAgentTaskState, AttachmentInput, SpawnAgentRequest,
+    AgentConfigSnapshot, AmbientAgentTaskState, AttachmentInput, RunFollowupRequest,
+    SpawnAgentRequest,
 };
 use crate::terminal::CLIAgent;
 use crate::terminal::view::ambient_agent::{SetupCommandGroupId, SetupCommandState};
@@ -919,20 +920,50 @@ impl AmbientAgentViewModel {
         self.submit_run_followup_unchecked(prompt, ctx);
     }
 
-    /// Submits a follow-up through the run follow-up service, the same way as
-    /// [`Self::submit_cloud_followup`], but without its `HandoffCloudCloud` gate.
+    /// Submits a follow-up into a retained environment-setup-failure debug session
+    /// (REMOTE-2661), via the same authenticated `submit_run_followup` service call as
+    /// [`Self::submit_cloud_followup`] but *not* gated on `HandoffCloudCloud`, and *not* routed
+    /// through [`Self::submit_run_followup_unchecked`]'s task-state polling.
     ///
-    /// Used for the REMOTE-2661 retained setup-failure debug route
-    /// (`AIQueryRouting::RetainedSetupFailureDebug`): every authenticated follow-up origin uses
-    /// this one retained-session route regardless of whether cloud-to-cloud handoff has rolled
-    /// out, since the server decides whether the follow-up bootstraps a debug conversation into
-    /// the retained session or starts a new cloud VM.
+    /// That polling waits for `task.state.is_working()` before it will report anything, to avoid
+    /// misreporting an ordinary cloud-to-cloud follow-up's stale prior-terminal-state as this
+    /// follow-up's own outcome. A retained debug session is different: its task is *supposed* to
+    /// stay in a failure-like state for the whole debug conversation (the run itself keeps
+    /// reporting failure; only the sandbox is kept alive), so `is_working()` never becomes true
+    /// and that polling would eventually give up and misreport the stale failure as this
+    /// follow-up's outcome — even though the debug conversation is actually succeeding via the
+    /// ordinary conversation/exchange stream. Instead, treat this as sent once the server accepts
+    /// the request; the conversation UI renders the response independently of `status`.
     pub fn submit_setup_failure_debug_followup(
         &mut self,
         prompt: String,
         ctx: &mut ModelContext<Self>,
     ) {
-        self.submit_run_followup_unchecked(prompt, ctx);
+        let Some(task_id) = self.task_id else {
+            log::warn!("Attempted to submit a setup-failure debug follow-up without an ambient task ID");
+            return;
+        };
+
+        let ai_client = ServerApiProvider::as_ref(ctx).get_ai_client();
+        let request = RunFollowupRequest {
+            message: prompt.clone(),
+        };
+        self.pending_followup_prompt = Some(prompt);
+        ctx.emit(AmbientAgentViewModelEvent::FollowupDispatched);
+
+        ctx.spawn(
+            async move { ai_client.submit_run_followup(&task_id, request).await },
+            |me, result, ctx| {
+                me.pending_followup_prompt = None;
+                if let Err(err) = result {
+                    log::warn!("Failed to submit setup-failure debug follow-up: {err}");
+                    ctx.emit(AmbientAgentViewModelEvent::FollowupSubmissionFailed {
+                        error_message: err.to_string(),
+                    });
+                }
+                ctx.notify();
+            },
+        );
     }
 
     fn submit_run_followup_unchecked(&mut self, prompt: String, ctx: &mut ModelContext<Self>) {
@@ -1571,6 +1602,14 @@ pub enum AmbientAgentViewModelEvent {
     EnvironmentSelected,
     /// The ambient agent failed.
     Failed {
+        error_message: String,
+    },
+    /// A retained-setup-failure debug follow-up (REMOTE-2661) failed to submit. Deliberately
+    /// distinct from `Failed`: the underlying run's own failure state is expected to persist for
+    /// the whole debug session, so this must not trigger the same tombstone/conversation-error
+    /// handling `Failed` does — it only needs a lightweight signal that this one message didn't
+    /// go through.
+    FollowupSubmissionFailed {
         error_message: String,
     },
     /// Request to show the cloud agent concurrency/capacity modal.

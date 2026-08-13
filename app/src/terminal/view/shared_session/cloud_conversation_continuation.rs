@@ -262,17 +262,38 @@ pub(crate) fn resolve_ai_query_routing(
 /// used for an ordinary owned cloud continuation. The server independently re-verifies all of
 /// this before actually accepting the follow-up; this only decides what the client presents.
 fn is_retained_setup_failure_debug_editable(task: &AmbientAgentTask, app: &AppContext) -> bool {
+    // TEMPORARY (REMOTE-2661): remove once retained-debug eligibility is confirmed working
+    // end-to-end against a real warp-server + session-sharing-server setup failure.
     if !task.is_open_for_setup_failure_debug_bootstrap() {
+        log::warn!(
+            "[REMOTE-2661 DEBUG] is_retained_setup_failure_debug_editable: task {:?} is not open \
+             for setup-failure debug bootstrap (see preceding log line for the failing condition)",
+            task.task_id
+        );
         return false;
     }
-    if !task
+    let debug_window_open = task
         .status_message
         .as_ref()
-        .is_some_and(|status_message| status_message.is_debug_window_open(Utc::now()))
-    {
+        .is_some_and(|status_message| status_message.is_debug_window_open(Utc::now()));
+    if !debug_window_open {
+        log::warn!(
+            "[REMOTE-2661 DEBUG] is_retained_setup_failure_debug_editable: task {:?} debug window \
+             not open (session_debug_until={:?}, now={:?})",
+            task.task_id,
+            task.status_message
+                .as_ref()
+                .and_then(|status_message| status_message.session_debug_until),
+            Utc::now()
+        );
         return false;
     }
-    task_creator_access(task, app) == ConversationAccess::Edit
+    let access = task_creator_access(task, app);
+    log::warn!(
+        "[REMOTE-2661 DEBUG] is_retained_setup_failure_debug_editable: task {:?} task_creator_access={access:?}",
+        task.task_id
+    );
+    access == ConversationAccess::Edit
 }
 
 /// Task-id-only entry point for [`is_retained_setup_failure_debug_editable`], for callers (e.g.

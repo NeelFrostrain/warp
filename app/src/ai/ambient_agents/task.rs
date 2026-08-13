@@ -338,13 +338,29 @@ impl AmbientAgentTask {
     /// only decides what the *client* should present as editable and where to route a
     /// submission — never what is safe to allow.
     pub fn is_open_for_setup_failure_debug_bootstrap(&self) -> bool {
+        let is_failure_like = self.state.is_failure_like();
+        let is_environment_setup_failure = self
+            .status_message
+            .as_ref()
+            .is_some_and(TaskStatusMessage::is_environment_setup_failure);
+        let has_no_conversation = self.conversation_id().is_none();
+        // TEMPORARY (REMOTE-2661): remove once retained-debug eligibility is confirmed working
+        // end-to-end against a real warp-server + session-sharing-server setup failure.
+        log::warn!(
+            "[REMOTE-2661 DEBUG] is_open_for_setup_failure_debug_bootstrap: task_id={:?} \
+             debug_agent_available={} is_failure_like={is_failure_like} (state={:?}) \
+             is_environment_setup_failure={is_environment_setup_failure} (error_code={:?}) \
+             has_no_conversation={has_no_conversation} (conversation_id={:?})",
+            self.task_id,
+            self.debug_agent_available,
+            self.state,
+            self.status_message.as_ref().and_then(|m| m.error_code.clone()),
+            self.conversation_id,
+        );
         self.debug_agent_available
-            && self.state.is_failure_like()
-            && self
-                .status_message
-                .as_ref()
-                .is_some_and(TaskStatusMessage::is_environment_setup_failure)
-            && self.conversation_id().is_none()
+            && is_failure_like
+            && is_environment_setup_failure
+            && has_no_conversation
     }
 
     /// Returns true when this task's source must not accept user-triggered cloud follow-ups.

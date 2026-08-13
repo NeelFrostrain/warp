@@ -118,7 +118,8 @@ impl TerminalView {
             AmbientAgentViewModelEvent::NeedsGithubAuth
             | AmbientAgentViewModelEvent::Cancelled
             | AmbientAgentViewModelEvent::HarnessCommandStarted { .. }
-            | AmbientAgentViewModelEvent::HandoffSnapshotUploadFailed { .. } => true,
+            | AmbientAgentViewModelEvent::HandoffSnapshotUploadFailed { .. }
+            | AmbientAgentViewModelEvent::FollowupSubmissionFailed { .. } => true,
             _ => false,
         };
         if should_clean_up_pending_cloud_query {
@@ -273,6 +274,17 @@ impl TerminalView {
                 }
                 // Re-render to show the error state.
                 ctx.emit(TerminalViewEvent::TerminalViewStateChanged);
+                ctx.notify();
+            }
+            AmbientAgentViewModelEvent::FollowupSubmissionFailed { error_message } => {
+                // REMOTE-2661: unlike `Failed`, the retained session's own failure state is
+                // expected to persist for the whole debug conversation, so this must not
+                // re-insert a tombstone or mark the conversation as errored — just tell the
+                // user this one message didn't go through.
+                self.show_error_toast(
+                    format!("Couldn't send your message to the retained session: {error_message}"),
+                    ctx,
+                );
                 ctx.notify();
             }
             AmbientAgentViewModelEvent::ShowCloudAgentCapacityModal => {
