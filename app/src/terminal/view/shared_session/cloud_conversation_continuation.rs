@@ -97,10 +97,28 @@ impl CloudConversationContinuationError {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ConversationAccess {
+pub(crate) enum ConversationAccess {
     Edit,
     ViewOnly,
     Unknown,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CompletedChildPresentation {
+    Continuation,
+    PassiveTranscript,
+}
+
+pub(crate) fn completed_child_presentation(
+    access: ConversationAccess,
+    blocks_cloud_followups: bool,
+) -> CompletedChildPresentation {
+    match (access, blocks_cloud_followups) {
+        (ConversationAccess::Edit, false) => CompletedChildPresentation::Continuation,
+        (ConversationAccess::Edit, true)
+        | (ConversationAccess::ViewOnly, _)
+        | (ConversationAccess::Unknown, _) => CompletedChildPresentation::PassiveTranscript,
+    }
 }
 
 pub(in crate::terminal::view) fn resolve_cloud_conversation_continuation_ui_state(
@@ -146,7 +164,7 @@ pub(in crate::terminal::view) fn resolve_cloud_conversation_continuation_ui_stat
         );
     }
 
-    let access = task_creator_access(&task, app);
+    let access = task_ownership_access(&task, app);
     if access == ConversationAccess::Edit {
         return continuation_ui_state_for_harness_and_access(
             task_harness(&task),
@@ -288,9 +306,9 @@ fn is_retained_setup_failure_debug_editable(task: &AmbientAgentTask, app: &AppCo
         );
         return false;
     }
-    let access = task_creator_access(task, app);
+    let access = task_ownership_access(task, app);
     log::warn!(
-        "[REMOTE-2661 DEBUG] is_retained_setup_failure_debug_editable: task {:?} task_creator_access={access:?}",
+        "[REMOTE-2661 DEBUG] is_retained_setup_failure_debug_editable: task {:?} task_ownership_access={access:?}",
         task.task_id
     );
     access == ConversationAccess::Edit
@@ -351,7 +369,7 @@ fn continuation_ui_state_for_harness_and_access(
     }
 }
 
-fn conversation_access(
+pub(crate) fn conversation_access(
     metadata: &ServerAIConversationMetadata,
     app: &AppContext,
 ) -> ConversationAccess {
@@ -416,26 +434,35 @@ fn conversation_access(
     }
 }
 
+pub(crate) fn completed_child_conversation_access(
+    metadata: Option<&ServerAIConversationMetadata>,
+    task: Option<&AmbientAgentTask>,
+    app: &AppContext,
+) -> ConversationAccess {
+    match metadata {
+        Some(metadata) => conversation_access(metadata, app),
+        None => task
+            .map(|task| task_ownership_access(task, app))
+            .unwrap_or(ConversationAccess::Unknown),
+    }
+}
+
 /// Whether the current principal may edit a task with no conversation yet: either the exact
 /// person who created it, or — for a team-owned run — a member of the owning team, mirroring
-/// the team-membership check `conversation_access` already applies once a conversation exists
-/// (see below). `creator` is only ever a natural person or service account (never a team; see
-/// `RunCreatorInfoType`), so an inherited, task-only proxy that checked `creator` alone could
-/// never recognize any other team member as authorized — including on the pre-existing
-/// `ContinueInCloud` tombstone this predicate was originally written for, not just the newer
-/// `DebugRetainedSetupFailure` one (REMOTE-2661) that reuses it.
-fn task_creator_access(task: &AmbientAgentTask, app: &AppContext) -> ConversationAccess {
+/// the team-membership check `conversation_access` already applies once a conversation exists.
+/// `creator` is only ever a natural person or service account (never a team; see
+/// `RunCreatorInfoType`), so checking `creator` alone could never recognize another team member
+/// as authorized.
+fn task_ownership_access(task: &AmbientAgentTask, app: &AppContext) -> ConversationAccess {
     if is_current_user_on_owning_team(task, app) {
         return ConversationAccess::Edit;
     }
 
-    let Some(current_user_uid) = AuthStateProvider::as_ref(app).get().user_id() else {
-        return ConversationAccess::Unknown;
-    };
+    let current_user_uid = AuthStateProvider::as_ref(app).get().user_id();
     if task
         .creator
         .as_ref()
-        .is_some_and(|creator| creator.uid == current_user_uid.as_str())
+        .is_some_and(|creator| current_user_uid.is_some_and(|uid| creator.uid == uid.as_str()))
     {
         ConversationAccess::Edit
     } else {

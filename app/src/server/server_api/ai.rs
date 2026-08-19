@@ -369,7 +369,7 @@ pub struct AgentMessageHeader {
     pub read_at: Option<String>,
 }
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct AgentRunEvent {
     pub event_type: String,
     pub run_id: String,

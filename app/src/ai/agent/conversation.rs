@@ -2294,8 +2294,11 @@ impl AIConversation {
             self.conversation_usage_metadata.context_window_usage =
                 usage_metadata.context_window_usage;
             self.conversation_usage_metadata.credits_spent = usage_metadata.credits_spent;
-            self.conversation_usage_metadata.platform_credits_spent =
-                usage_metadata.platform_credits_spent;
+            #[allow(deprecated)]
+            {
+                self.conversation_usage_metadata.platform_credits_spent =
+                    usage_metadata.platform_credits_spent;
+            }
             let llm_preferences = LLMPreferences::as_ref(ctx);
             self.conversation_usage_metadata.token_usage =
                 footer_model_token_usage(&usage_metadata, llm_preferences);
@@ -3593,8 +3596,16 @@ impl AIConversation {
         &mut self,
         ctx: &mut ModelContext<BlocklistAIHistoryModel>,
     ) {
-        // We should not persist non-local conversations (e.g. shared sessions).
-        if self.is_viewing_shared_session {
+        // Don't persist viewer conversations (e.g. shared sessions).
+        // Under the unified stack, remote child placeholder conversations are
+        // also not persisted — they are rediscovered on restore via the
+        // ancestor-list seed, so a persisted row would only risk going stale.
+        // Under the flag-off path, remote children must be persisted so they
+        // survive restarts.
+        if self.is_viewing_shared_session
+            || (self.is_remote_child
+                && crate::features::FeatureFlag::OrchestrationUnifiedStack.is_enabled())
+        {
             return;
         }
 
@@ -3639,12 +3650,13 @@ impl AIConversation {
             }
         };
 
+        let updated_tasks: Vec<_> = self
+            .all_tasks()
+            .filter_map(|task| task.source_for_persistence())
+            .collect();
         let event = ModelEvent::UpdateMultiAgentConversation {
             conversation_id: self.id.to_string(),
-            updated_tasks: self
-                .all_tasks()
-                .filter_map(|task| task.source_for_persistence())
-                .collect(),
+            updated_tasks,
             conversation_data: AgentConversationData {
                 server_conversation_token: self
                     .server_conversation_token
