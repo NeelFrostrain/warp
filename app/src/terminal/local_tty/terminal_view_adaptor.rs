@@ -115,23 +115,27 @@ async fn is_setup_failure_debug_prompt_authorized(
 }
 
 /// Records that `request_id` is awaiting a newly created conversation's server token, when
-/// `request` is a `purpose`-tagged, token-less bootstrap request (REMOTE-2661). No-op for an
-/// ordinary agent prompt request (one with no `purpose`, or one continuing an existing
-/// conversation via `server_conversation_token`), which the server does not need reported back.
-fn register_bootstrap_ack_if_purpose_tagged(
+/// `request` is a bootstrap request (REMOTE-2661). No-op for an ordinary agent prompt request,
+/// whose resulting conversation the server does not need reported back.
+///
+/// The predicate — an idempotency key with no conversation to continue — is the same one
+/// session-sharing-server applies when deciding to wait for this acknowledgement, and the two
+/// must agree: a bootstrap the server waits on but the sharer never acknowledges is treated as
+/// an undelivered injection and retried until the caller's deadline. Both sides evaluate it
+/// against the *parsed* token, so an absent or unparseable conversation id counts as no
+/// conversation on either side.
+fn register_bootstrap_ack_if_bootstrap_request(
     network: &mut Network,
     request_id: &AgentPromptRequestId,
     participant_id: &ParticipantId,
     request: &AgentPromptRequest,
 ) {
-    if request.purpose.is_none() {
-        return;
-    }
-    let Some(idempotency_key) = request.idempotency_key.clone() else {
-        log::warn!(
-            "Accepting a purpose-tagged agent prompt request with no idempotency_key (REMOTE-2661); cannot report the resulting conversation back to the server"
-        );
-        return;
+    let idempotency_key = match (
+        &request.server_conversation_token,
+        &request.idempotency_key,
+    ) {
+        (None, Some(idempotency_key)) => idempotency_key.clone(),
+        _ => return,
     };
     network.set_pending_bootstrap_ack(request_id.clone(), participant_id.clone(), idempotency_key);
 }
@@ -662,10 +666,8 @@ fn wire_up_terminal_view_session_sharing(
                     }
 
                     // REMOTE-2661: report the conversation just assigned a server token back to
-                    // session-sharing-server when it is the one a purpose-tagged bootstrap
-                    // request is waiting on, so the caller's synchronous inject-message wait
-                    // (session-sharing-server polling for this outcome) can complete. Runs
-                    // before, and independent of, the source-task-id upgrade below.
+                    // session-sharing-server when it is the one a bootstrap request is waiting
+                    // on, so the caller's synchronous inject-message wait can complete.
                     if let Some(network) = session_sharer_for_stream_init.borrow().as_ref() {
                         let pending_ack = network
                             .update(ctx, |network, _ctx| network.take_pending_bootstrap_ack());
@@ -1569,7 +1571,7 @@ impl TerminalManager<TerminalView> {
                                     },
                                     move |network, authorized, ctx| {
                                         if authorized {
-                                            register_bootstrap_ack_if_purpose_tagged(
+                                            register_bootstrap_ack_if_bootstrap_request(
                                                 network,
                                                 &id,
                                                 &participant_id,
@@ -1601,7 +1603,12 @@ impl TerminalManager<TerminalView> {
                 }
 
                 network.update(ctx, |network, _ctx| {
-                    register_bootstrap_ack_if_purpose_tagged(network, id, participant_id, request);
+                    register_bootstrap_ack_if_bootstrap_request(
+                        network,
+                        id,
+                        participant_id,
+                        request,
+                    );
                 });
                 accept_agent_prompt(&terminal_view, request.clone(), participant_id.clone(), ctx);
             }

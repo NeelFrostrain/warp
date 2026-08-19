@@ -6586,7 +6586,7 @@ dependencies = [
  "js-sys",
  "log",
  "wasm-bindgen",
- "windows-core 0.62.2",
+ "windows-core 0.61.2",
 ]
 
 [[package]]
@@ -10578,7 +10578,7 @@ version = "0.14.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "343d3bd7056eda839b03204e68deff7d1b13aba7af2b2fd16890697274262ee7"
 dependencies = [
- "heck 0.5.0",
+ "heck 0.4.1",
  "itertools 0.10.5",
  "log",
  "multimap",
@@ -12603,7 +12603,7 @@ dependencies = [
 [[package]]
 name = "session-sharing-protocol"
 version = "0.0.0"
-source = "git+https://github.com/warpdotdev/session-sharing-protocol.git?rev=9c616093c88aa2bab5ce58a3a93dd1781f4ca787#9c616093c88aa2bab5ce58a3a93dd1781f4ca787"
+source = "git+https://github.com/warpdotdev/session-sharing-protocol.git?rev=4888e75853f3e63f7ac3c2fa44355f54e59ac284#4888e75853f3e63f7ac3c2fa44355f54e59ac284"
 dependencies = [
  "byte-unit",
  "serde",

@@ -713,8 +713,8 @@ impl Network {
         id: AgentPromptRequestId,
         participant_id: ParticipantId,
         reason: AgentPromptFailureReason,
-        // `Some` only when rejecting a `purpose`-tagged bootstrap request (REMOTE-2661), so the
-        // server can record the rejection under the same idempotency key a retry will look up.
+        // `Some` only when rejecting a bootstrap request (REMOTE-2661), so the server can record
+        // the rejection under the same idempotency key a retry will look up.
         idempotency_key: Option<String>,
     ) {
         let message = UpstreamMessage::RejectAgentPromptRequest {
@@ -726,10 +726,10 @@ impl Network {
         self.send_message_to_server(message);
     }
 
-    /// Reports the conversation created or reused for a `purpose`-tagged agent prompt request
-    /// that carried no `server_conversation_token` (REMOTE-2661). Must be sent for every such
-    /// request the sharer accepts, so the server can persist the resulting conversation before
-    /// the caller's synchronous inject-message request is allowed to observe an outcome.
+    /// Reports the conversation created or reused for a bootstrap agent prompt request — one
+    /// carrying an idempotency key and no `server_conversation_token` (REMOTE-2661). Must be sent
+    /// for every such request the sharer accepts, so the server can persist the resulting
+    /// conversation before the caller's synchronous inject-message request observes an outcome.
     pub fn send_agent_prompt_acknowledgement(
         &mut self,
         id: AgentPromptRequestId,
@@ -747,9 +747,9 @@ impl Network {
     }
 
     /// Records that `request_id` is awaiting the conversation the sharer is about to create or
-    /// reuse for a `purpose`-tagged, token-less agent prompt request (REMOTE-2661). Call this
-    /// right after choosing to accept such a request, before the resulting conversation's
-    /// server token is known.
+    /// reuse for a token-less bootstrap agent prompt request (REMOTE-2661). Call this right after
+    /// choosing to accept such a request, before the resulting conversation's server token is
+    /// known.
     pub fn set_pending_bootstrap_ack(
         &mut self,
         request_id: AgentPromptRequestId,

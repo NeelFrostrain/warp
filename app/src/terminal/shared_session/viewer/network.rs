@@ -953,9 +953,8 @@ impl Network {
             server_conversation_token,
             prompt,
             attachments,
-            // A live viewer's own prompt is never a `purpose`-tagged bootstrap request; those
-            // are only ever server-injected on behalf of the sharer (REMOTE-2661).
-            purpose: None,
+            // A live viewer's own prompt is never a bootstrap request; those are only ever
+            // server-injected on behalf of the sharer (REMOTE-2661).
             idempotency_key: None,
         };
         self.send_message_to_server(UpstreamMessage::SendAgentPrompt(request));
@@ -1171,11 +1170,6 @@ pub fn agent_prompt_failure_reason_string(reason: &AgentPromptFailureReason) -> 
         }
         AgentPromptFailureReason::CommandInProgress => {
             "A long running command is currently in progress. Please wait for it to complete before sending an agent prompt.".to_owned()
-        }
-        // A live viewer never sends a `purpose`-tagged request itself (REMOTE-2661), so this
-        // reason is not expected to reach viewer-facing UI in practice.
-        AgentPromptFailureReason::NotEligibleForPurpose => {
-            "This session is no longer eligible for a debug agent.".to_owned()
         }
     }
 }

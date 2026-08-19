@@ -278,7 +278,7 @@ serde_urlencoded = "0.7"
 serde_with = "^3.21"
 serde_yaml = "0.8"
 # TODO(REMOTE-2661): point back at main once warpdotdev/session-sharing-protocol#65 merges.
-session-sharing-protocol = { git = "https://github.com/warpdotdev/session-sharing-protocol.git", rev = "9c616093c88aa2bab5ce58a3a93dd1781f4ca787" }
+session-sharing-protocol = { git = "https://github.com/warpdotdev/session-sharing-protocol.git", rev = "4888e75853f3e63f7ac3c2fa44355f54e59ac284" }
 similar = { version = "2.7", features = ["inline"] }
 simplelog = "0.12.2"
 smallvec = "1.6.1"
