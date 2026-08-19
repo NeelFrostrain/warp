@@ -130,10 +130,7 @@ fn register_bootstrap_ack_if_bootstrap_request(
     participant_id: &ParticipantId,
     request: &AgentPromptRequest,
 ) {
-    let idempotency_key = match (
-        &request.server_conversation_token,
-        &request.idempotency_key,
-    ) {
+    let idempotency_key = match (&request.server_conversation_token, &request.idempotency_key) {
         (None, Some(idempotency_key)) => idempotency_key.clone(),
         _ => return,
     };

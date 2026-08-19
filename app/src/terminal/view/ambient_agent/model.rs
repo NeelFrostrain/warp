@@ -940,7 +940,9 @@ impl AmbientAgentViewModel {
         ctx: &mut ModelContext<Self>,
     ) {
         let Some(task_id) = self.task_id else {
-            log::warn!("Attempted to submit a setup-failure debug follow-up without an ambient task ID");
+            log::warn!(
+                "Attempted to submit a setup-failure debug follow-up without an ambient task ID"
+            );
             return;
         };
 
