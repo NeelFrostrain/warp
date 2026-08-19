@@ -47,6 +47,10 @@ fn routing_allows_live_input_only_for_executable_shared_session_role() {
         let task_id = ambient_task_id(1);
         let reader = ambient_pane_model(task_id, SharedSessionStatus::reader());
         let executor = ambient_pane_model(task_id, SharedSessionStatus::executor());
+        // `resolve_ai_query_routing` checks retained-debug eligibility before the live-viewer
+        // branch, and that check reads `AgentConversationsModel`. Leaving it empty is the point:
+        // with no task row, an ordinary live viewer must still route to `LiveRemoteVm`.
+        app.add_singleton_model(AgentConversationsModel::new);
         app.update(|ctx| {
             assert_eq!(
                 resolve_ai_query_routing(EntityId::new(), None, &reader, ctx),
