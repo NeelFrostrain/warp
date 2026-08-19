@@ -723,6 +723,87 @@ fn retained_setup_failure_with_debug_agent_available_shows_debug_cta_and_routing
     });
 }
 
+/// PRODUCT.md §7: once the first bootstrap persists a conversation ID, every later prompt must
+/// still go through the authenticated run follow-up service. An attached viewer must therefore
+/// keep resolving to the retained-debug route rather than falling back to the direct
+/// `LiveRemoteVm` viewer path the moment a conversation exists.
+#[test]
+fn retained_setup_failure_with_a_conversation_still_routes_to_the_debug_followup() {
+    App::test((), |mut app| async move {
+        let TestHandles {
+            terminal_view_id,
+            task_id,
+        } = setup_app(
+            &mut app,
+            AuthFixture::LoggedIn,
+            AIAgentHarness::Oz,
+            ConversationPermissionFixture::CurrentUserOwner,
+        );
+        AgentConversationsModel::handle(&app).update(&mut app, |model, _| {
+            let mut task =
+                ambient_agent_task(task_id, CONVERSATION_TOKEN, AmbientAgentTaskState::Failed);
+            task.debug_agent_available = true;
+            task.status_message = Some(TaskStatusMessage {
+                message: "Environment setup failed: Failed to run setup command: hi".to_string(),
+                error_code: Some(TaskStatusErrorCode::EnvironmentSetupFailed),
+                session_debug_until: Some(Utc::now() + chrono::Duration::minutes(5)),
+                debug_agent_active: false,
+            });
+            model.insert_task_for_test(task);
+        });
+
+        app.update(|ctx| {
+            let attached_viewer = ambient_pane_model(task_id, SharedSessionStatus::executor());
+            assert_eq!(
+                resolve_ai_query_routing(terminal_view_id, None, &attached_viewer, ctx),
+                AIQueryRouting::RetainedSetupFailureDebug { task_id },
+                "a later prompt on a retained failure that already has a conversation must not fall back to the direct viewer path"
+            );
+        });
+    });
+}
+
+/// PRODUCT.md §1 and §24: an active debug turn pins the idle timer, so the published deadline
+/// stops sliding and can fall behind. The entry point must stay open on the strength of
+/// `debug_agent_active` alone, or a long autonomous turn loses the input it is running in.
+#[test]
+fn retained_setup_failure_stays_eligible_while_a_debug_turn_pins_the_window() {
+    App::test((), |mut app| async move {
+        let TestHandles {
+            terminal_view_id,
+            task_id,
+        } = setup_app(
+            &mut app,
+            AuthFixture::LoggedIn,
+            AIAgentHarness::Oz,
+            ConversationPermissionFixture::CurrentUserOwner,
+        );
+        AgentConversationsModel::handle(&app).update(&mut app, |model, _| {
+            let mut task =
+                ambient_agent_task(task_id, CONVERSATION_TOKEN, AmbientAgentTaskState::Failed);
+            task.conversation_id = None;
+            task.debug_agent_available = true;
+            task.status_message = Some(TaskStatusMessage {
+                message: "Environment setup failed: Failed to run setup command: hi".to_string(),
+                error_code: Some(TaskStatusErrorCode::EnvironmentSetupFailed),
+                session_debug_until: Some(Utc::now() - chrono::Duration::minutes(5)),
+                debug_agent_active: true,
+            });
+            model.insert_task_for_test(task);
+        });
+
+        app.update(|ctx| {
+            assert_eq!(
+                resolve_cloud_conversation_continuation_ui_state(terminal_view_id, task_id, ctx),
+                Ok(CloudConversationContinuationUiState::Tombstone {
+                    cta: Some(TombstoneCta::DebugRetainedSetupFailure { task_id }),
+                }),
+                "a pinned debug turn must keep the entry point open past the published deadline"
+            );
+        });
+    });
+}
+
 /// A team-owned retained setup-failure run must offer the Debug CTA to a team member who is
 /// not the literal creator, mirroring the pre-existing team-ownership recognition
 /// `third_party_conversation_owned_by_current_team_shows_continue_in_cloud_tombstone` already

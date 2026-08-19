@@ -364,43 +364,33 @@ impl AmbientAgentTask {
         self.conversation_id.as_deref()
     }
 
-    /// Whether this run is a still-open, no-conversation-yet environment-setup-failure retained
-    /// session eligible for a debug agent bootstrap (REMOTE-2661).
+    /// Whether this run is a retained environment-setup-failure session whose debug window is
+    /// still usable, so a debug prompt may be routed into it (REMOTE-2661).
     ///
     /// ANDs the server-computed `debug_agent_available` capability (warp-server#14231) — which
     /// also accounts for both eligibility feature flags and the batched sandbox-reachability
-    /// signal, neither of which the client can see — with the client-observable conditions this
-    /// helper checked before that field existed. `debug_agent_available` defaults to `false` on
-    /// an older server that never sends it, so this fails closed rather than falling back to the
-    /// client-only proxy. The server remains the sole authority regardless: it independently
-    /// re-verifies eligibility before accepting a debug follow-up or letting an `IN_PROGRESS`
-    /// report reopen the run (see `BeginTaskProgress`'s retained-execution guard), so this helper
-    /// only decides what the *client* should present as editable and where to route a
-    /// submission — never what is safe to allow.
-    pub fn is_open_for_setup_failure_debug_bootstrap(&self) -> bool {
-        let is_failure_like = self.state.is_failure_like();
-        let is_environment_setup_failure = self
-            .status_message
-            .as_ref()
-            .is_some_and(TaskStatusMessage::is_environment_setup_failure);
-        let has_no_conversation = self.conversation_id().is_none();
-        // TEMPORARY (REMOTE-2661): remove once retained-debug eligibility is confirmed working
-        // end-to-end against a real warp-server + session-sharing-server setup failure.
-        log::warn!(
-            "[REMOTE-2661 DEBUG] is_open_for_setup_failure_debug_bootstrap: task_id={:?} \
-             debug_agent_available={} is_failure_like={is_failure_like} (state={:?}) \
-             is_environment_setup_failure={is_environment_setup_failure} (error_code={:?}) \
-             has_no_conversation={has_no_conversation} (conversation_id={:?})",
-            self.task_id,
-            self.debug_agent_available,
-            self.state,
-            self.status_message.as_ref().and_then(|m| m.error_code.clone()),
-            self.conversation_id,
-        );
+    /// signal, neither of which the client can see — with the client-observable failure
+    /// conditions. It defaults to `false` on an older server, so this fails closed. An active
+    /// turn keeps the session usable past the last published deadline (PRODUCT.md §1, §24),
+    /// which the deadline alone cannot express because the sharer stops sliding it while pinned.
+    /// The server remains the sole authority: it independently re-verifies eligibility before
+    /// accepting a debug follow-up, so this only decides what the client presents and where a
+    /// submission goes.
+    pub fn is_setup_failure_debug_session_open(&self) -> bool {
         self.debug_agent_available
-            && is_failure_like
-            && is_environment_setup_failure
-            && has_no_conversation
+            && self.state.is_failure_like()
+            && self.status_message.as_ref().is_some_and(|status_message| {
+                status_message.is_environment_setup_failure()
+                    && (status_message.is_debug_window_open(Utc::now())
+                        || status_message.debug_agent_active)
+            })
+    }
+
+    /// Whether a debug conversation may still be *bootstrapped* into this retained session, i.e.
+    /// none exists yet. A later prompt reuses the persisted conversation instead, and is routed
+    /// by [`Self::is_setup_failure_debug_session_open`] alone.
+    pub fn is_open_for_setup_failure_debug_bootstrap(&self) -> bool {
+        self.is_setup_failure_debug_session_open() && self.conversation_id().is_none()
     }
 
     /// Returns true when this task's source must not accept user-triggered cloud follow-ups.

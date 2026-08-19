@@ -493,34 +493,13 @@ impl Input {
                 ctx.dispatch_typed_action(&TerminalAction::OpenAddRulePane);
             }
             SlashCommandKind::Agent | SlashCommandKind::New => {
-                // REMOTE-2661: `resolve_ai_query_routing`'s retained-setup-failure-debug check
-                // can only answer "eligible" once the task has been fetched into
-                // `AgentConversationsModel`. An absent task is indistinguishable from a
-                // genuinely ineligible one, so without this guard a fast `/agent` right after an
-                // ambient tombstone renders (before its async task fetch resolves) falls straight
-                // through to `EnterAgentView` below and silently starts a brand-new *local*
-                // conversation instead of the retained *cloud* debug session. Block and kick off
-                // (or dedupe) the fetch instead, mirroring the analogous guard
-                // `maybe_route_ai_query_to_remote_target` applies for an attached ambient viewer.
-                let ambient_task_id_pending_cache = {
-                    let model = self.model.lock();
-                    self.ambient_agent_view_model()
-                        .and_then(|m| m.as_ref(ctx).task_id())
-                        .or_else(|| model.ambient_agent_task_id())
-                }
-                .filter(|task_id| {
-                    AgentConversationsModel::as_ref(ctx)
-                        .get_task_data(task_id)
-                        .is_none()
-                });
-                if let Some(task_id) = ambient_task_id_pending_cache {
-                    AgentConversationsModel::handle(ctx).update(ctx, |model, ctx| {
-                        model.get_or_async_fetch_task_data(&task_id, ctx);
-                    });
-                    show_error_toast(
-                        "Still checking this session's status — please try sending your message again in a moment.".to_string(),
-                        ctx,
-                    );
+                // Without this, a fast `/agent` right after an ambient tombstone renders (before
+                // its async task fetch resolves) would fall through to `EnterAgentView` below and
+                // start a brand-new *local* conversation instead of the retained *cloud* one.
+                if self.block_submission_while_ambient_task_unresolved(
+                    self.ambient_agent_task_id(ctx),
+                    ctx,
+                ) {
                     return true;
                 }
 

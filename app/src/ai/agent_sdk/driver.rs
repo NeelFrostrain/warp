@@ -363,10 +363,6 @@ impl<T: Clone + Send + 'static> IdleTimeoutSender<T> {
 /// only when no turn is pinning it. Idempotent by turn ID: pinning an already-pinned turn, or
 /// finishing an unpinned/unknown turn, is a no-op — duplicate conversation-status events can
 /// never leak a pin or shorten the window.
-///
-/// Distinct from [`arm_debug_window`](AgentDriver::arm_debug_window), which handles an
-/// *existing* Oz/CLI conversation's own terminal failure: that case has exactly one
-/// conversation and no notion of a later debug turn being bootstrapped into it.
 struct DebugWindowController<T: Clone + Send + 'static> {
     idle_timeout: IdleTimeoutSender<T>,
     active_turns: Arc<Mutex<HashSet<AIConversationId>>>,
@@ -3116,7 +3112,7 @@ impl AgentDriver {
             return;
         };
 
-        Self::report_failure_before_lingering(foreground, stage, error).await;
+        Self::report_failure_before_lingering(foreground, stage, error, window).await;
 
         let (tx, rx) = oneshot::channel::<()>();
         let controller = DebugWindowController::new(IdleTimeoutSender::new(tx));
@@ -3167,12 +3163,9 @@ impl AgentDriver {
     }
 
     /// Subscribes the terminal driver's viewer-input events to `refresh`, publishing the
-    /// resulting deadline whenever a keystroke moves it. Shared by [`Self::arm_debug_window`]
-    /// (a plain refresh via `IdleTimeoutSender::refresh`) and
-    /// [`Self::arm_setup_failure_debug_window`] (the pin-aware
-    /// `DebugWindowController::refresh_from_last_armed`, which is inert while a debug turn is
-    /// pinning the window) — the two differ only in which refresh function is pin-aware, not in
-    /// how the subscription or the resulting publish behaves.
+    /// resulting deadline whenever a keystroke moves it. Callers supply the refresh function so a
+    /// pin-aware one (`DebugWindowController::refresh_from_last_armed`, inert while a debug turn
+    /// pins the window) and a plain one (`IdleTimeoutSender::refresh`) can share this wiring.
     fn subscribe_to_viewer_input_refresh(
         &self,
         ctx: &mut ModelContext<Self>,
@@ -3194,12 +3187,10 @@ impl AgentDriver {
     /// Arms the post-failure debug window for a retained environment-setup failure and installs
     /// the subscriptions that keep it alive across a debug turn (REMOTE-2661).
     ///
-    /// Unlike [`Self::arm_debug_window`] (used when an *existing* Oz/CLI conversation itself
-    /// fails), no conversation exists yet here: the window must survive a brand-new debug
-    /// conversation being bootstrapped into the retained session, with no viewer input of its
-    /// own to refresh it. Viewer keystrokes still refresh the window exactly as before; a debug
-    /// conversation additionally pins it for the duration of each turn (accepted → terminal) and
-    /// re-arms the full interval when the turn ends.
+    /// Unlike [`Self::arm_debug_window`], no conversation exists yet here: the window must
+    /// survive a debug conversation being bootstrapped into the retained session with no viewer
+    /// input of its own to refresh it, so a turn pins it for its duration (accepted → terminal)
+    /// and re-arms the full interval when it ends.
     fn arm_setup_failure_debug_window(
         &mut self,
         controller: DebugWindowController<()>,
@@ -3207,8 +3198,9 @@ impl AgentDriver {
         ctx: &mut ModelContext<Self>,
     ) {
         controller.refresh_idle((), window);
-        self.last_published_debug_deadline = None;
-        self.publish_debug_window_deadline(window, None, ctx);
+        // The first deadline already went out with the setup-failure state
+        // (`report_failure_before_lingering`); record it so the throttle counts it as published.
+        self.last_published_debug_deadline = Some(SystemTime::now());
 
         let terminal_surface_id = self.terminal_driver.as_ref(ctx).terminal_view().id();
 
@@ -3262,11 +3254,9 @@ impl AgentDriver {
     /// optionally the REMOTE-2661 `debug_agent_active` pin flag alongside it.
     ///
     /// The deadline publish is throttled, since the window refreshes on keystroke-level events;
-    /// the published value is advisory and lags the real deadline conservatively, since the
-    /// agent process owns the timer. `debug_agent_active`, when `Some`, is never throttled: a
-    /// pin/unpin transition must be reflected immediately regardless of how recently the
-    /// deadline was last published, since it's a discrete state change rather than a sliding
-    /// value.
+    /// the published value is advisory and lags the real deadline conservatively, since the agent
+    /// process owns the timer. `debug_agent_active`, when `Some`, is never throttled: a pin/unpin
+    /// transition is a discrete state change, not a sliding value.
     fn publish_debug_window_deadline(
         &mut self,
         window: Duration,
@@ -3317,15 +3307,19 @@ impl AgentDriver {
         );
     }
 
-    /// Reports the run's terminal failure state before the debug window starts.
+    /// Reports the run's terminal failure state, its status message, and the debug window's first
+    /// deadline in one update.
     ///
     /// A setup failure never creates a conversation, so `LocalAgentTaskSyncModel` — which derives
     /// task state from conversation status — never fires for it, and the run would otherwise read
-    /// as in-progress for the whole window.
+    /// as in-progress for the whole window. Carrying the deadline in the same update leaves no
+    /// interval in which the server sees a terminal setup failure without knowing that a debug
+    /// window is opening.
     async fn report_failure_before_lingering(
         foreground: &ModelSpawner<Self>,
         stage: &str,
         error: &AgentDriverError,
+        window: Duration,
     ) {
         let message = error.to_string();
         let resolved = foreground
@@ -3339,6 +3333,7 @@ impl AgentDriver {
         };
 
         let status = setup_failure_status_update(message);
+        let deadline = Utc::now() + chrono::Duration::from_std(window).unwrap_or_default();
         if let Err(error) = ai_client
             .update_agent_task(
                 task_id,
@@ -3346,7 +3341,7 @@ impl AgentDriver {
                 None,
                 None,
                 Some(status),
-                None,
+                Some(deadline),
                 None,
             )
             .await

@@ -1,4 +1,3 @@
-use chrono::Utc;
 use warp_cli::agent::Harness;
 use warpui::{AppContext, EntityId, ModelHandle, SingletonEntity};
 
@@ -271,47 +270,18 @@ pub(crate) fn resolve_ai_query_routing(
     }
 }
 
-/// Whether `task`'s retained setup-failure tombstone should present an editable agent input for
-/// the current principal, rather than the ordinary no-CTA read-only tombstone (REMOTE-2661).
+/// Whether `task`'s retained setup-failure session presents an editable agent input for the
+/// current principal and routes its submissions through the authenticated run follow-up service
+/// (REMOTE-2661), rather than the read-only no-CTA tombstone or the direct viewer prompt path.
 ///
-/// Requires (a) the client-side eligibility proxy (failure-like state, `ENVIRONMENT_SETUP_FAILED`,
-/// no conversation yet — see `AmbientAgentTask::is_open_for_setup_failure_debug_bootstrap`), (b) a
-/// debug window the server has reported as still open, and (c) the same follow-up authorization
-/// used for an ordinary owned cloud continuation. The server independently re-verifies all of
-/// this before actually accepting the follow-up; this only decides what the client presents.
+/// Deliberately independent of whether a debug conversation exists yet: PRODUCT.md §7 requires
+/// every later prompt to reuse that conversation through the same authenticated route, so this
+/// must stay true once the first bootstrap persists a conversation ID. Authorization is the same
+/// follow-up check an ordinary owned cloud continuation uses, and the server re-verifies it
+/// before accepting the follow-up.
 fn is_retained_setup_failure_debug_editable(task: &AmbientAgentTask, app: &AppContext) -> bool {
-    // TEMPORARY (REMOTE-2661): remove once retained-debug eligibility is confirmed working
-    // end-to-end against a real warp-server + session-sharing-server setup failure.
-    if !task.is_open_for_setup_failure_debug_bootstrap() {
-        log::warn!(
-            "[REMOTE-2661 DEBUG] is_retained_setup_failure_debug_editable: task {:?} is not open \
-             for setup-failure debug bootstrap (see preceding log line for the failing condition)",
-            task.task_id
-        );
-        return false;
-    }
-    let debug_window_open = task
-        .status_message
-        .as_ref()
-        .is_some_and(|status_message| status_message.is_debug_window_open(Utc::now()));
-    if !debug_window_open {
-        log::warn!(
-            "[REMOTE-2661 DEBUG] is_retained_setup_failure_debug_editable: task {:?} debug window \
-             not open (session_debug_until={:?}, now={:?})",
-            task.task_id,
-            task.status_message
-                .as_ref()
-                .and_then(|status_message| status_message.session_debug_until),
-            Utc::now()
-        );
-        return false;
-    }
-    let access = task_ownership_access(task, app);
-    log::warn!(
-        "[REMOTE-2661 DEBUG] is_retained_setup_failure_debug_editable: task {:?} task_ownership_access={access:?}",
-        task.task_id
-    );
-    access == ConversationAccess::Edit
+    task.is_setup_failure_debug_session_open()
+        && task_ownership_access(task, app) == ConversationAccess::Edit
 }
 
 /// Task-id-only entry point for [`is_retained_setup_failure_debug_editable`], for callers (e.g.

@@ -155,6 +155,7 @@ use crate::ai::agent::{
 use crate::ai::agent_conversations_model::{
     AgentConversationNavigationSubject, AgentConversationsModel,
 };
+use crate::ai::ambient_agents::AmbientAgentTaskId;
 use crate::ai::ambient_agents::telemetry::HandoffEntryPoint;
 use crate::ai::attachment_utils::MAX_ATTACHMENT_SIZE_BYTES;
 use crate::ai::block_context::BlockContext;
@@ -4176,6 +4177,43 @@ impl Input {
             .map(AmbientAgentViewState::view_model)
     }
 
+    /// The ambient agent run this pane belongs to, if any.
+    fn ambient_agent_task_id(&self, ctx: &AppContext) -> Option<AmbientAgentTaskId> {
+        self.ambient_agent_view_model()
+            .and_then(|model| model.as_ref(ctx).task_id())
+            .or_else(|| self.model.lock().ambient_agent_task_id())
+    }
+
+    /// Blocks a submission for `task_id` while that task is not in [`AgentConversationsModel`]
+    /// yet, starting (or deduping) its fetch and telling the user to retry (REMOTE-2661).
+    ///
+    /// `resolve_ai_query_routing` can only answer "eligible for the retained setup-failure debug
+    /// route" once the task is cached; an absent task is indistinguishable from a genuinely
+    /// ineligible one. Treating unknown as ineligible would fall back to the direct viewer path
+    /// or to a brand-new local conversation, both of which this feature deliberately closes, so
+    /// this fails closed instead. Returns `true` when the caller must stop.
+    fn block_submission_while_ambient_task_unresolved(
+        &self,
+        task_id: Option<AmbientAgentTaskId>,
+        ctx: &mut ViewContext<Self>,
+    ) -> bool {
+        let Some(task_id) = task_id.filter(|task_id| {
+            AgentConversationsModel::as_ref(ctx)
+                .get_task_data(task_id)
+                .is_none()
+        }) else {
+            return false;
+        };
+        AgentConversationsModel::handle(ctx).update(ctx, |model, ctx| {
+            model.get_or_async_fetch_task_data(&task_id, ctx);
+        });
+        self.show_ephemeral_error_toast(
+            "Still checking this session's status — please try sending your message again in a moment.",
+            ctx,
+        );
+        true
+    }
+
     /// Shows a transient error toast for a follow-up submission that was blocked or redirected.
     fn show_ephemeral_error_toast(&self, message: &str, ctx: &mut ViewContext<Self>) {
         let window_id = ctx.window_id();
@@ -4205,41 +4243,23 @@ impl Input {
             return false;
         }
 
-        // REMOTE-2661: `resolve_ai_query_routing`'s retained-setup-failure-debug check can only
-        // answer "eligible" or "not eligible" once the task has actually been fetched into
-        // `AgentConversationsModel` -- an absent task is indistinguishable from a genuinely
-        // ineligible one at that call site, so it silently falls through to the ordinary
-        // `LiveRemoteVm` path. Eligibility being *unknown* must not be treated the same as
-        // *known ineligible*: block the submission, kick off (or dedupe) the fetch, and tell the
-        // user to retry, rather than let it invisibly reopen a route this feature deliberately
-        // closed. Scoped to an attached ambient live viewer specifically, since that's the one
-        // case this silent fallback is unsafe for; an ordinary composing pane with no ambient
-        // task yet is unaffected.
-        if let Some(task_id) = {
+        // Scoped to an attached ambient live viewer, the one case where unresolved eligibility
+        // would otherwise fall through to the ordinary `LiveRemoteVm` path; a composing pane with
+        // no ambient task yet is unaffected.
+        let is_attached_ambient_viewer = {
             let model = self.model.lock();
-            let is_active_ambient_viewer = model.shared_session_status().is_active_viewer()
+            model.shared_session_status().is_active_viewer()
                 && (model.is_shared_ambient_agent_session()
                     || self
                         .ambient_agent_view_model()
-                        .is_some_and(|m| m.as_ref(ctx).is_ambient_agent()));
-            is_active_ambient_viewer
-                .then(|| {
-                    self.ambient_agent_view_model()
-                        .and_then(|m| m.as_ref(ctx).task_id())
-                        .or_else(|| model.ambient_agent_task_id())
-                })
-                .flatten()
-        } && AgentConversationsModel::as_ref(ctx)
-            .get_task_data(&task_id)
-            .is_none()
-        {
-            AgentConversationsModel::handle(ctx).update(ctx, |model, ctx| {
-                model.get_or_async_fetch_task_data(&task_id, ctx);
-            });
-            self.show_ephemeral_error_toast(
-                "Still checking this session's status — please try sending your message again in a moment.",
-                ctx,
-            );
+                        .is_some_and(|m| m.as_ref(ctx).is_ambient_agent()))
+        };
+        if self.block_submission_while_ambient_task_unresolved(
+            is_attached_ambient_viewer
+                .then(|| self.ambient_agent_task_id(ctx))
+                .flatten(),
+            ctx,
+        ) {
             return true;
         }
 

@@ -1521,7 +1521,7 @@ impl TerminalManager<TerminalView> {
                         let task_id = model.lock().ambient_agent_task_id().filter(|task_id| {
                             AgentConversationsModel::as_ref(ctx)
                                 .get_task_data(task_id)
-                                .is_some_and(|task| task.is_open_for_setup_failure_debug_bootstrap())
+                                .is_some_and(|task| task.is_setup_failure_debug_session_open())
                         });
                         if let Some(task_id) = task_id {
                             let participant_firebase_uid = terminal_view
