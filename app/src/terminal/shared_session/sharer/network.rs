@@ -23,9 +23,9 @@ use session_sharing_protocol::common::{
     ControlActionFailureReason, ControlActionRequestId, FeatureSupport, InputOperationId,
     InputOperationSeqNo, InputUpdate, OrderedTerminalEvent, OrderedTerminalEventType,
     ParticipantId, ParticipantList, ParticipantPresenceUpdate, Role, RoleRequestId,
-    RoleRequestResponse, Scrollback, Selection, SelectionUpdate, ServerConversationToken,
-    SessionId, UniversalDeveloperInputContext, UniversalDeveloperInputContextUpdate, UserID,
-    WindowSize, WriteToPtyFailureReason, WriteToPtyRequestId,
+    RoleRequestResponse, Scrollback, Selection, SelectionUpdate, SessionId,
+    UniversalDeveloperInputContext, UniversalDeveloperInputContextUpdate, UserID, WindowSize,
+    WriteToPtyFailureReason, WriteToPtyRequestId,
 };
 #[cfg(not(any(test, feature = "integration_tests")))]
 use session_sharing_protocol::common::{SelectedAgentModel, TelemetryContext};
@@ -304,21 +304,6 @@ pub struct Network {
 
     /// Input updates buffered while disconnected, to be flushed on reconnect.
     pending_input_updates: Vec<InputUpdate>,
-
-    /// The outstanding `purpose`-tagged, token-less agent prompt request awaiting a newly
-    /// created conversation's server token, if any (REMOTE-2661). Set when such a request is
-    /// accepted; taken and reported via [`Self::send_agent_prompt_acknowledgement`] once
-    /// `BlocklistAIHistoryEvent::ConversationServerTokenAssigned` fires for this terminal
-    /// surface. At most one is tracked at a time, since a retained setup-failure session has
-    /// no conversation until the first such request bootstraps one.
-    pending_bootstrap_ack: Option<PendingBootstrapAck>,
-}
-
-/// See [`Network::pending_bootstrap_ack`].
-struct PendingBootstrapAck {
-    request_id: AgentPromptRequestId,
-    participant_id: ParticipantId,
-    idempotency_key: String,
 }
 
 impl Network {
@@ -365,7 +350,6 @@ impl Network {
             unacked_terminal_events: HashMap::new(),
             next_buffer_seq_no: (init_block_id, InputOperationSeqNo::zero()),
             pending_input_updates: Vec::new(),
-            pending_bootstrap_ack: None,
         };
         let sharer_firebase_uid = UserUid::new("mock_firebase_uid");
         ctx.emit(NetworkEvent::SharedSessionCreatedSuccessfully {
@@ -461,7 +445,6 @@ impl Network {
             unacked_terminal_events: HashMap::new(),
             next_buffer_seq_no: (init_block_id.clone(), InputOperationSeqNo::zero()),
             pending_input_updates: Vec::new(),
-            pending_bootstrap_ack: None,
         };
 
         // We should validate the scrollback is under the limit before creating the Network, but check here just to be safe.
@@ -724,54 +707,6 @@ impl Network {
             idempotency_key,
         };
         self.send_message_to_server(message);
-    }
-
-    /// Reports the conversation created or reused for a bootstrap agent prompt request — one
-    /// carrying an idempotency key and no `server_conversation_token` (REMOTE-2661). Must be sent
-    /// for every such request the sharer accepts, so the server can persist the resulting
-    /// conversation before the caller's synchronous inject-message request observes an outcome.
-    pub fn send_agent_prompt_acknowledgement(
-        &mut self,
-        id: AgentPromptRequestId,
-        participant_id: ParticipantId,
-        server_conversation_token: ServerConversationToken,
-        idempotency_key: String,
-    ) {
-        let message = UpstreamMessage::AcknowledgeAgentPromptRequest {
-            id,
-            participant_id,
-            server_conversation_token,
-            idempotency_key,
-        };
-        self.send_message_to_server(message);
-    }
-
-    /// Records that `request_id` is awaiting the conversation the sharer is about to create or
-    /// reuse for a token-less bootstrap agent prompt request (REMOTE-2661). Call this right after
-    /// choosing to accept such a request, before the resulting conversation's server token is
-    /// known.
-    pub fn set_pending_bootstrap_ack(
-        &mut self,
-        request_id: AgentPromptRequestId,
-        participant_id: ParticipantId,
-        idempotency_key: String,
-    ) {
-        self.pending_bootstrap_ack = Some(PendingBootstrapAck {
-            request_id,
-            participant_id,
-            idempotency_key,
-        });
-    }
-
-    /// Takes the outstanding bootstrap-ack correlation state, if any. Callers use this when a
-    /// new conversation's server token becomes known, to decide whether to report it back to
-    /// session-sharing-server (REMOTE-2661).
-    pub fn take_pending_bootstrap_ack(
-        &mut self,
-    ) -> Option<(AgentPromptRequestId, ParticipantId, String)> {
-        self.pending_bootstrap_ack
-            .take()
-            .map(|ack| (ack.request_id, ack.participant_id, ack.idempotency_key))
     }
 
     pub fn send_control_action_rejection(

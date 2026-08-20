@@ -6,8 +6,8 @@ use std::sync::mpsc::SyncSender;
 
 use parking_lot::FairMutex;
 use session_sharing_protocol::common::{
-    ActivePrompt, AgentPromptFailureReason, AgentPromptRequest, AgentPromptRequestId,
-    CLIAgentSessionState, CommandExecutionFailureReason, ControlAction, ControlActionFailureReason,
+    ActivePrompt, AgentPromptFailureReason, AgentPromptRequest, CLIAgentSessionState,
+    CommandExecutionFailureReason, ControlAction, ControlActionFailureReason,
     LongRunningCommandAgentInteraction, ParticipantId, SelectedAgentModel,
     UniversalDeveloperInputContextUpdate, WriteToPtyFailureReason,
 };
@@ -112,29 +112,6 @@ async fn is_setup_failure_debug_prompt_authorized(
         )
         .await
         .unwrap_or(false)
-}
-
-/// Records that `request_id` is awaiting a newly created conversation's server token, when
-/// `request` is a bootstrap request (REMOTE-2661). No-op for an ordinary agent prompt request,
-/// whose resulting conversation the server does not need reported back.
-///
-/// The predicate — an idempotency key with no conversation to continue — is the same one
-/// session-sharing-server applies when deciding to wait for this acknowledgement, and the two
-/// must agree: a bootstrap the server waits on but the sharer never acknowledges is treated as
-/// an undelivered injection and retried until the caller's deadline. Both sides evaluate it
-/// against the *parsed* token, so an absent or unparseable conversation id counts as no
-/// conversation on either side.
-fn register_bootstrap_ack_if_bootstrap_request(
-    network: &mut Network,
-    request_id: &AgentPromptRequestId,
-    participant_id: &ParticipantId,
-    request: &AgentPromptRequest,
-) {
-    let idempotency_key = match (&request.server_conversation_token, &request.idempotency_key) {
-        (None, Some(idempotency_key)) => idempotency_key.clone(),
-        _ => return,
-    };
-    network.set_pending_bootstrap_ack(request_id.clone(), participant_id.clone(), idempotency_key);
 }
 
 /// Honors an already-authorized agent prompt: writes it to the CLI harness PTY when one is
@@ -660,52 +637,6 @@ fn wire_up_terminal_view_session_sharing(
                 } => {
                     if *terminal_surface_id != view_id_for_stream_init {
                         return;
-                    }
-
-                    // REMOTE-2661: report the conversation just assigned a server token back to
-                    // session-sharing-server when it is the one a bootstrap request is waiting
-                    // on, so the caller's synchronous inject-message wait can complete.
-                    if let Some(network) = session_sharer_for_stream_init.borrow().as_ref() {
-                        let pending_ack = network
-                            .update(ctx, |network, _ctx| network.take_pending_bootstrap_ack());
-                        if let Some((request_id, participant_id, idempotency_key)) = pending_ack {
-                            let server_conversation_token = BlocklistAIHistoryModel::as_ref(ctx)
-                                .conversation(conversation_id)
-                                .and_then(|c| c.server_conversation_token().cloned())
-                                .and_then(|token| {
-                                    session_sharing_protocol::common::ServerConversationToken::try_from(
-                                        token,
-                                    )
-                                    .ok()
-                                });
-                            match server_conversation_token {
-                                Some(server_conversation_token) => {
-                                    network.update(ctx, |network, _ctx| {
-                                        network.send_agent_prompt_acknowledgement(
-                                            request_id,
-                                            participant_id,
-                                            server_conversation_token,
-                                            idempotency_key,
-                                        );
-                                    });
-                                }
-                                None => {
-                                    // Should not happen: this event fires exactly when the
-                                    // conversation's token becomes known. Put the pending ack
-                                    // back so a later assignment, if any, can still complete it.
-                                    log::warn!(
-                                        "ConversationServerTokenAssigned fired with no resolvable server_conversation_token (REMOTE-2661)"
-                                    );
-                                    network.update(ctx, |network, _ctx| {
-                                        network.set_pending_bootstrap_ack(
-                                            request_id,
-                                            participant_id,
-                                            idempotency_key,
-                                        );
-                                    });
-                                }
-                            }
-                        }
                     }
 
                     let Some(view) = weak_view_for_stream_init.upgrade(ctx) else {
@@ -1568,12 +1499,6 @@ impl TerminalManager<TerminalView> {
                                     },
                                     move |network, authorized, ctx| {
                                         if authorized {
-                                            register_bootstrap_ack_if_bootstrap_request(
-                                                network,
-                                                &id,
-                                                &participant_id,
-                                                &request,
-                                            );
                                             accept_agent_prompt(
                                                 &terminal_view,
                                                 request,
@@ -1599,14 +1524,6 @@ impl TerminalManager<TerminalView> {
                     }
                 }
 
-                network.update(ctx, |network, _ctx| {
-                    register_bootstrap_ack_if_bootstrap_request(
-                        network,
-                        id,
-                        participant_id,
-                        request,
-                    );
-                });
                 accept_agent_prompt(&terminal_view, request.clone(), participant_id.clone(), ctx);
             }
             NetworkEvent::LinkAccessLevelUpdateResponse { response } => {
