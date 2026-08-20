@@ -24,7 +24,9 @@ use super::cache_setup;
 use super::terminal::TerminalDriver;
 use crate::ai::agent_sdk::setup_observability::{SetupClientEventReporter, SetupStep};
 use crate::ai::cloud_environments::{AmbientAgentEnvironment, SourceRepo};
-use crate::terminal::model::session::command_executor::shell_escape_single_quotes;
+use crate::terminal::model::session::command_executor::{
+    shell_escape_single_quotes, shell_quote_arg,
+};
 use crate::terminal::shell::ShellType;
 
 const CODEBASE_INDEX_SYNC_TIMEOUT: Duration = Duration::from_secs(60);
@@ -252,7 +254,13 @@ pub(crate) fn resolve_eager_source_repos(
 /// Builds the hidden, transport-neutral on-demand-clone instruction for repositories that
 /// remain deferred after the eager repository list for this run is resolved. Returns `None`
 /// when nothing is deferred, so callers omit the instruction entirely.
+///
+/// `working_dir` is the run's working directory: `prepare_environment` auto-`cd`s into a
+/// single eager repository before this instruction is dispatched (see [`single_repo_name`]),
+/// so every generated command must target an absolute, escaped path rather than a bare
+/// repository name, or it would clone underneath that eager repository instead of alongside it.
 pub(crate) fn build_deferred_repos_instruction(
+    working_dir: &Path,
     eager_repos: &[SourceRepo],
     deferred_repos: &[SourceRepo],
 ) -> Option<String> {
@@ -273,28 +281,27 @@ pub(crate) fn build_deferred_repos_instruction(
     // The client clones every eager repository to `{working_dir}/{repo}` and rejects two
     // eager repositories that share an exact target name before cloning (see
     // `merge_repos_deduped`). A deferred repository whose default target collides with that
-    // eager set, or with another deferred repository, must not be offered the shared path.
-    let mut target_name_counts: HashMap<&str, usize> = HashMap::new();
-    for repo in eager_repos.iter().chain(sorted_deferred.iter()) {
-        *target_name_counts.entry(repo.repo.as_str()).or_default() += 1;
-    }
-
+    // eager set, or with another deferred repository, must not be offered the shared path;
+    // `target_name_conflict` below detects and names that collision per repository.
     let entries = sorted_deferred.iter().map(|repo| {
         let forge = repo.code_forge.unwrap_or_default();
         let clone_url = repo.https_clone_url();
         let identity = format!("{forge} {}/{}", repo.owner, repo.repo);
-        if target_name_counts.get(repo.repo.as_str()).copied().unwrap_or(0) > 1 {
+        if let Some(conflicting) = target_name_conflict(repo, eager_repos, &sorted_deferred) {
+            let placeholder = working_dir.join("<unused-target>").to_string_lossy().into_owned();
+            let quoted_placeholder = shell_quote_arg(&placeholder, ShellType::Bash);
             format!(
-                "- {identity}\n  Clone URL: {clone_url}\n  Target conflict: another attached repository already uses '{}' as its target. \
-                 Choose an explicit, unused target directory before cloning:\n  \
-                 test ! -e '<unused-target>' && git clone --filter=tree:0 {clone_url} '<unused-target>'",
+                "- {identity}\n  Clone URL: {clone_url}\n  Target conflict: {conflicting} already uses '{}' as its target. \
+                 Choose an explicit, unused target path before cloning:\n  \
+                 test ! -e {quoted_placeholder} && git clone --filter=tree:0 {clone_url} {quoted_placeholder}",
                 repo.repo
             )
         } else {
+            let target = working_dir.join(&repo.repo).to_string_lossy().into_owned();
+            let quoted_target = shell_quote_arg(&target, ShellType::Bash);
             format!(
-                "- {identity}\n  Clone URL: {clone_url}\n  Preferred target: {}\n  \
-                 test ! -e '{}' && git clone --filter=tree:0 {clone_url} '{}'",
-                repo.repo, repo.repo, repo.repo
+                "- {identity}\n  Clone URL: {clone_url}\n  Preferred target: {target}\n  \
+                 test ! -e {quoted_target} && git clone --filter=tree:0 {clone_url} {quoted_target}",
             )
         }
     });
@@ -312,6 +319,38 @@ pub(crate) fn build_deferred_repos_instruction(
          build cache, or register the repository with Oz codebase indexing.",
         entries.collect::<Vec<_>>().join("\n\n")
     ))
+}
+
+/// Returns a display string naming every other repository (eager or deferred) that shares
+/// `repo`'s exact clone target name, or `None` when `repo`'s target is unambiguous. Lets the
+/// hidden instruction tell the agent exactly which identities it must avoid colliding with
+/// instead of only "another attached repository".
+fn target_name_conflict(
+    repo: &SourceRepo,
+    eager_repos: &[SourceRepo],
+    deferred_repos: &[SourceRepo],
+) -> Option<String> {
+    let conflicting: Vec<String> = eager_repos
+        .iter()
+        .chain(deferred_repos.iter())
+        .filter(|other| {
+            other.repo == repo.repo
+                && (other.owner != repo.owner || other.code_forge != repo.code_forge)
+        })
+        .map(|other| {
+            format!(
+                "{} {}/{}",
+                other.code_forge.unwrap_or_default(),
+                other.owner,
+                other.repo
+            )
+        })
+        .collect();
+    if conflicting.is_empty() {
+        None
+    } else {
+        Some(conflicting.join(", "))
+    }
 }
 
 /// Environment variable carrying the authenticated remote URL of a Factory's

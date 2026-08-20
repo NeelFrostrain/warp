@@ -2794,10 +2794,15 @@ impl AgentDriver {
             additional_source_repos,
         )?;
         // Built once, before the eager list can be moved into repository preparation below,
-        // so it is available whichever harness the run dispatches to.
-        if let Some(instruction) =
-            environment::build_deferred_repos_instruction(&source_repos, &deferred_source_repos)
-        {
+        // so it is available whichever harness the run dispatches to. `prepare_environment`
+        // auto-`cd`s into a single eager repository, so the instruction must target absolute
+        // paths under the run's working directory rather than bare repository names.
+        let working_dir_for_instruction = foreground.spawn(|me, _| me.working_dir.clone()).await?;
+        if let Some(instruction) = environment::build_deferred_repos_instruction(
+            &working_dir_for_instruction,
+            &source_repos,
+            &deferred_source_repos,
+        ) {
             inject_deferred_repos_instruction(&mut task.prompt, instruction);
         }
 

@@ -208,10 +208,14 @@ fn zero_eager_repos_leaves_no_repo_to_auto_cd_into() {
     assert_eq!(single_repo_name(&eager), None);
 }
 
+fn test_working_dir() -> PathBuf {
+    PathBuf::from("/home/agent")
+}
+
 #[test]
 fn deferred_instruction_absent_when_nothing_deferred() {
     let eager = vec![repo(CodeForge::GitHub, "acme", "monolith")];
-    assert!(build_deferred_repos_instruction(&eager, &[]).is_none());
+    assert!(build_deferred_repos_instruction(&test_working_dir(), &eager, &[]).is_none());
 }
 
 #[test]
@@ -220,7 +224,8 @@ fn deferred_instruction_lists_github_and_nested_gitlab_repos_in_order() {
         repo(CodeForge::GitLab, "platform/backend", "api"),
         repo(CodeForge::GitHub, "acme", "billing"),
     ];
-    let instruction = build_deferred_repos_instruction(&[], &deferred).unwrap();
+    let instruction =
+        build_deferred_repos_instruction(&test_working_dir(), &[], &deferred).unwrap();
 
     let github_pos = instruction.find("GitHub acme/billing").unwrap();
     let gitlab_pos = instruction.find("GitLab platform/backend/api").unwrap();
@@ -230,8 +235,27 @@ fn deferred_instruction_lists_github_and_nested_gitlab_repos_in_order() {
     );
     assert!(instruction.contains("https://github.com/acme/billing.git"));
     assert!(instruction.contains("https://gitlab.com/platform/backend/api.git"));
-    assert!(instruction.contains("test ! -e 'billing' && git clone --filter=tree:0"));
-    assert!(instruction.contains("test ! -e 'api' && git clone --filter=tree:0"));
+    assert!(instruction.contains("test ! -e '/home/agent/billing' && git clone --filter=tree:0"));
+    assert!(instruction.contains("test ! -e '/home/agent/api' && git clone --filter=tree:0"));
+}
+
+#[test]
+fn deferred_instruction_targets_absolute_paths_under_the_single_eager_repo_auto_cd_state() {
+    // `prepare_environment` auto-`cd`s into the sole eager repository before this
+    // instruction is dispatched, so a relative target like 'billing' would clone into
+    // `{working_dir}/{eager_repo}/billing` instead of alongside it. The generated command
+    // must anchor the target at the run's working directory regardless of the shell's cwd.
+    let working_dir = test_working_dir();
+    let eager = vec![repo(CodeForge::GitHub, "acme", "eager-repo")];
+    let deferred = vec![repo(CodeForge::GitHub, "acme", "billing")];
+    let instruction = build_deferred_repos_instruction(&working_dir, &eager, &deferred).unwrap();
+
+    assert!(instruction.contains("Preferred target: /home/agent/billing"));
+    assert!(instruction.contains("test ! -e '/home/agent/billing' && git clone --filter=tree:0"));
+    assert!(
+        !instruction.contains("'billing'"),
+        "must not emit a bare relative target: {instruction}"
+    );
 }
 
 #[test]
@@ -246,8 +270,8 @@ fn deferred_instruction_is_deterministic_regardless_of_input_order() {
     ];
 
     assert_eq!(
-        build_deferred_repos_instruction(&[], &a),
-        build_deferred_repos_instruction(&[], &b)
+        build_deferred_repos_instruction(&test_working_dir(), &[], &a),
+        build_deferred_repos_instruction(&test_working_dir(), &[], &b)
     );
 }
 
@@ -257,21 +281,30 @@ fn deferred_instruction_flags_conflict_with_shared_target_name_and_never_emits_i
         repo(CodeForge::GitHub, "acme", "widget"),
         repo(CodeForge::GitLab, "other", "widget"),
     ];
-    let instruction = build_deferred_repos_instruction(&[], &deferred).unwrap();
+    let instruction =
+        build_deferred_repos_instruction(&test_working_dir(), &[], &deferred).unwrap();
 
-    assert!(!instruction.contains("test ! -e 'widget'"));
+    assert!(!instruction.contains("'/home/agent/widget'"));
     assert!(instruction.contains("Target conflict"));
-    assert!(instruction.contains("test ! -e '<unused-target>' && git clone --filter=tree:0"));
+    // The conflicting identities must be named explicitly, not "another attached repository".
+    assert!(instruction.contains("GitHub acme/widget already uses 'widget'"));
+    assert!(instruction.contains("GitLab other/widget already uses 'widget'"));
+    assert!(
+        instruction
+            .contains("test ! -e '/home/agent/<unused-target>' && git clone --filter=tree:0")
+    );
 }
 
 #[test]
 fn deferred_instruction_flags_conflict_with_an_eager_repo_target() {
     let eager = vec![repo(CodeForge::GitHub, "acme", "widget")];
     let deferred = vec![repo(CodeForge::GitLab, "other", "widget")];
-    let instruction = build_deferred_repos_instruction(&eager, &deferred).unwrap();
+    let instruction =
+        build_deferred_repos_instruction(&test_working_dir(), &eager, &deferred).unwrap();
 
-    assert!(!instruction.contains("test ! -e 'widget'"));
+    assert!(!instruction.contains("'/home/agent/widget'"));
     assert!(instruction.contains("Target conflict"));
+    assert!(instruction.contains("GitHub acme/widget already uses 'widget'"));
 }
 
 #[test]
@@ -281,7 +314,8 @@ fn deferred_instruction_every_command_guards_target_existence() {
         repo(CodeForge::GitHub, "acme", "widget"),
         repo(CodeForge::GitLab, "other", "widget"),
     ];
-    let instruction = build_deferred_repos_instruction(&[], &deferred).unwrap();
+    let instruction =
+        build_deferred_repos_instruction(&test_working_dir(), &[], &deferred).unwrap();
 
     for line in instruction
         .lines()
@@ -300,7 +334,8 @@ fn deferred_instruction_never_contains_secret_bearing_content() {
     // access token in a..."); what must never appear is an actual credential value, a
     // userinfo-bearing URL, or the definition-checkout clone-URL variable.
     let deferred = vec![repo(CodeForge::GitHub, "acme", "billing")];
-    let instruction = build_deferred_repos_instruction(&[], &deferred).unwrap();
+    let instruction =
+        build_deferred_repos_instruction(&test_working_dir(), &[], &deferred).unwrap();
 
     assert!(!instruction.contains("WARP_FACTORY_REPO_CLONE_URL"));
     assert!(
