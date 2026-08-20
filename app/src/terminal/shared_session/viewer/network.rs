@@ -953,9 +953,6 @@ impl Network {
             server_conversation_token,
             prompt,
             attachments,
-            // A live viewer's own prompt is never a bootstrap request; those are only ever
-            // server-injected on behalf of the sharer (REMOTE-2661).
-            idempotency_key: None,
         };
         self.send_message_to_server(UpstreamMessage::SendAgentPrompt(request));
     }

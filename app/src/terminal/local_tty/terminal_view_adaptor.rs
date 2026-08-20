@@ -1405,7 +1405,6 @@ impl TerminalManager<TerminalView> {
                                 id.clone(),
                                 participant_id.clone(),
                                 AgentPromptFailureReason::InsufficientPermissions,
-                                request.idempotency_key.clone(),
                             );
                         });
                         return;
@@ -1417,7 +1416,6 @@ impl TerminalManager<TerminalView> {
                                 id.clone(),
                                 participant_id.clone(),
                                 AgentPromptFailureReason::InsufficientPermissions,
-                                request.idempotency_key.clone(),
                             );
                         });
                         return;
@@ -1431,7 +1429,6 @@ impl TerminalManager<TerminalView> {
                                 id.clone(),
                                 participant_id.clone(),
                                 AgentPromptFailureReason::InvalidConversation,
-                                request.idempotency_key.clone(),
                             );
                         });
                         return;
@@ -1467,7 +1464,6 @@ impl TerminalManager<TerminalView> {
                                         id.clone(),
                                         participant_id.clone(),
                                         AgentPromptFailureReason::InsufficientPermissions,
-                                        request.idempotency_key.clone(),
                                     );
                                 });
                                 return;
@@ -1513,7 +1509,6 @@ impl TerminalManager<TerminalView> {
                                                 id,
                                                 participant_id,
                                                 AgentPromptFailureReason::InsufficientPermissions,
-                                                request.idempotency_key.clone(),
                                             );
                                         }
                                     },

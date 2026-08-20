@@ -696,15 +696,11 @@ impl Network {
         id: AgentPromptRequestId,
         participant_id: ParticipantId,
         reason: AgentPromptFailureReason,
-        // `Some` only when rejecting a bootstrap request (REMOTE-2661), so the server can record
-        // the rejection under the same idempotency key a retry will look up.
-        idempotency_key: Option<String>,
     ) {
         let message = UpstreamMessage::RejectAgentPromptRequest {
             id,
             participant_id,
             reason,
-            idempotency_key,
         };
         self.send_message_to_server(message);
     }
