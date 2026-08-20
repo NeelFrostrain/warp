@@ -496,7 +496,7 @@ impl Input {
             SlashCommandKind::Agent | SlashCommandKind::New => {
                 // Without this, a fast `/agent` right after an ambient tombstone renders (before
                 // its async task fetch resolves) would fall through to `EnterAgentView` below and
-                // start a brand-new *local* conversation instead of the retained *cloud* one.
+                // start a local conversation instead of the retained cloud one.
                 if self.block_submission_while_ambient_task_unresolved(
                     self.ambient_agent_task_id(ctx),
                     ctx,
@@ -504,12 +504,9 @@ impl Input {
                     return true;
                 }
 
-                // REMOTE-2661: a retained environment-setup-failure session has no local
-                // conversation to start into, so `EnterAgentView` below would be wrong here —
-                // it would try to start a brand new *local* conversation inside what is
-                // supposed to stay a retained *cloud* debug session. Route through the same
-                // authenticated follow-up path that plain (no-slash-command) input already
-                // uses correctly for this pane.
+                // REMOTE-2661: a retained setup-failure session has no local conversation to
+                // start into, so route it through the same authenticated follow-up path plain
+                // input already uses for this pane, rather than `EnterAgentView` below.
                 let retained_setup_failure_debug_task_id = {
                     let model = self.model.lock();
                     match resolve_ai_query_routing(

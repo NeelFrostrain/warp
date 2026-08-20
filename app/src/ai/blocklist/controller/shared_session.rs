@@ -832,9 +832,8 @@ impl BlocklistAIController {
     }
 
     /// Whether a no-token shared-session prompt landing right now would bootstrap a debug
-    /// conversation into a retained environment-setup-failure session (REMOTE-2661), rather than
-    /// an ordinary new conversation. Getting it wrong only costs a misleading client lifecycle
-    /// update; the server independently guards the run from reopening.
+    /// conversation into a retained environment-setup-failure session (REMOTE-2661). Getting
+    /// this wrong only costs a misleading lifecycle update; the server guards against reopening.
     fn is_open_for_setup_failure_debug_bootstrap(&self, ctx: &AppContext) -> bool {
         self.ambient_agent_task_id.is_some_and(|task_id| {
             AgentConversationsModel::as_ref(ctx)
@@ -844,9 +843,8 @@ impl BlocklistAIController {
     }
 
     /// Tags `conversation_id` as a setup-failure debug bootstrap so `LocalAgentTaskSyncModel`
-    /// stops deriving task lifecycle updates from it. Must run before the conversation's first
-    /// exchange can report a server token — that's what would otherwise trigger the erroneous
-    /// `IN_PROGRESS` report this tag exists to prevent.
+    /// stops deriving task lifecycle updates from it. Must run before the first exchange can
+    /// report a server token, which would otherwise trigger an erroneous `IN_PROGRESS` report.
     fn tag_conversation_as_setup_failure_debug_bootstrap(
         &self,
         conversation_id: AIConversationId,
@@ -894,9 +892,8 @@ impl BlocklistAIController {
                 ctx,
             );
         } else {
-            // No token: the server only omits it when this prompt is either an ordinary first
-            // message or a setup-failure debug bootstrap (REMOTE-2661) — check which, before any
-            // conversation exists, so the tag lands before the first status update can fire.
+            // Check before any conversation exists, so the tag lands before the first status
+            // update can fire (REMOTE-2661).
             let bootstraps_setup_failure_debug =
                 self.is_open_for_setup_failure_debug_bootstrap(ctx);
 
@@ -953,9 +950,7 @@ impl BlocklistAIController {
 
             if bootstraps_setup_failure_debug {
                 // The legacy (non-AgentView) path doesn't hand back the new conversation ID
-                // directly; it becomes this terminal surface's active conversation synchronously
-                // as part of the send above, well before any async server round-trip can assign
-                // it a token.
+                // directly; it becomes this surface's active conversation synchronously above.
                 if let Some(conversation_id) = BlocklistAIHistoryModel::as_ref(ctx)
                     .active_conversation_id(self.terminal_surface_id)
                 {

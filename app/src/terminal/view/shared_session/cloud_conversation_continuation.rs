@@ -36,13 +36,10 @@ pub(in crate::terminal::view) enum CloudConversationContinuationUiState {
 /// agent input footer live-VM indicator.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum AIQueryRouting {
-    /// Connected as a live shared-session viewer (an ambient cloud run or a shared session); the
-    /// follow-up is forwarded to the sharer via the viewer prompt path. `is_executor` is true when
-    /// this viewer may submit (read-only viewers are blocked). `ambient_agent_task_id` is set only
-    /// for ambient agent shared sessions (it is `None` for a shared local session), so the footer
-    /// shows the live-VM indicator only for ambient runs. Also used for a disconnected pane whose
-    /// owned run still has an active execution we can't attach to as a viewer, in which case
-    /// `is_executor` is false and the submission router surfaces stale-pane guidance.
+    /// Connected as a live shared-session viewer; the follow-up is forwarded to the sharer.
+    /// `is_executor` gates whether this viewer may submit. `ambient_agent_task_id` is `None`
+    /// for a shared local session, so the footer's live-VM indicator stays hidden for those.
+    /// Also covers a disconnected pane whose owned run has an execution we can't attach to.
     LiveRemoteVm {
         is_executor: bool,
         ambient_agent_task_id: Option<AmbientAgentTaskId>,
@@ -56,11 +53,9 @@ pub(crate) enum AIQueryRouting {
     /// Continues on the local machine. Covers ordinary local agent panes and local ambient sharers
     /// (e.g. `run_agents(local)` orchestration children, `/remote-control` of a local session).
     Local,
-    /// A retained environment-setup-failure session with an open debug window (REMOTE-2661): the
-    /// follow-up must route through the authenticated run follow-up service so the server's
-    /// bootstrap-or-continue eligibility check applies, and must never fall through to the
-    /// direct live-viewer prompt path or the local agent — both would bypass follow-up
-    /// authorization and let the debug conversation's own lifecycle report reopen the run.
+    /// A retained environment-setup-failure session with an open debug window (REMOTE-2661).
+    /// Must route through the authenticated follow-up service, never the direct viewer prompt
+    /// path or the local agent — either would bypass authorization and could reopen the run.
     RetainedSetupFailureDebug { task_id: AmbientAgentTaskId },
 }
 
@@ -172,10 +167,8 @@ pub(in crate::terminal::view) fn resolve_cloud_conversation_continuation_ui_stat
 }
 
 /// Resolves the ambient agent task id for a pane: the attached ambient view model's task id
-/// takes priority, falling back to the terminal model's own (e.g. a shared-session viewer or a
-/// restored ambient conversation-transcript pane). Shared by [`resolve_ai_query_routing`],
-/// `TerminalView`'s conversation-details-panel gate, and `Input`'s no-token-prompt guards, so
-/// the three surfaces cannot drift on how they resolve the same task id.
+/// takes priority, falling back to the terminal model's own. Shared by
+/// [`resolve_ai_query_routing`] and other callers so they can't drift on how they resolve it.
 pub(crate) fn resolve_ambient_agent_task_id(
     ambient_agent_view_model: Option<&ModelHandle<AmbientAgentViewModel>>,
     terminal_model: &TerminalModel,
@@ -199,16 +192,12 @@ pub(crate) fn resolve_ai_query_routing(
     let is_ambient = terminal_model.is_shared_ambient_agent_session()
         || ambient_agent_view_model.is_some_and(|model| model.as_ref(app).is_ambient_agent());
     let is_transcript_viewer = terminal_model.is_conversation_transcript_viewer();
-    // The ambient task this pane is associated with, if any. `None` for a shared *local* session,
-    // which keeps the footer's live-VM indicator hidden for non-ambient shared sessions.
+    // `None` for a shared *local* session, hiding the footer's live-VM indicator for it.
     let ambient_agent_task_id =
         resolve_ambient_agent_task_id(ambient_agent_view_model, terminal_model, app);
 
-    // A retained setup-failure debug session takes priority over ordinary live-viewer routing:
-    // an already-attached viewer must still submit through the authenticated follow-up service
-    // rather than the direct viewer prompt path, closing the bypass where a no-token prompt sent
-    // straight to the sharer could start a conversation and reopen the run (the exact bypass
-    // `execute_agent_prompt_for_shared_session` used to allow).
+    // Takes priority over live-viewer routing below: an already-attached viewer must still
+    // submit through the authenticated follow-up service, not the direct viewer prompt path.
     if let Some(task_id) = ambient_agent_task_id
         && let Some(task) = AgentConversationsModel::as_ref(app).get_task_data(&task_id)
         && is_retained_setup_failure_debug_editable(&task, app)
@@ -216,10 +205,8 @@ pub(crate) fn resolve_ai_query_routing(
         return AIQueryRouting::RetainedSetupFailureDebug { task_id };
     }
 
-    // A live shared-session viewer forwards its follow-up to the sharer via the viewer prompt path,
-    // whether the shared session is an ambient cloud run or a shared local session. `is_executor`
-    // tells the submission router whether this viewer may actually submit; `ambient_agent_task_id`
-    // is set only for ambient runs so the footer indicator stays hidden for shared local sessions.
+    // A live shared-session viewer forwards its follow-up to the sharer via the viewer prompt
+    // path, whether the shared session is an ambient cloud run or a shared local session.
     if status.is_active_viewer() {
         return AIQueryRouting::LiveRemoteVm {
             is_executor: status.is_executor(),
@@ -227,8 +214,7 @@ pub(crate) fn resolve_ai_query_routing(
         };
     }
 
-    // Ordinary local pane (not a cloud/ambient or transcript pane), or a sharer running locally
-    // (e.g. a local orchestration child, `/remote-control` of a local session): local behavior.
+    // Ordinary local pane, or a sharer running locally (e.g. a local orchestration child).
     if !is_ambient && !is_transcript_viewer {
         return AIQueryRouting::Local;
     }
@@ -238,8 +224,6 @@ pub(crate) fn resolve_ai_query_routing(
 
     // Disconnected / ended / transcript ambient pane: defer to the resolved continuation state.
     let Some(task_id) = ambient_agent_task_id else {
-        // No ambient task yet (fresh composing cloud pane, replay/loading, or a generic local
-        // transcript): defer to existing local handling.
         return AIQueryRouting::Local;
     };
 
@@ -250,18 +234,12 @@ pub(crate) fn resolve_ai_query_routing(
         {
             AIQueryRouting::NewCloudVm { task_id }
         }
-        // A third-party harness run (Claude Code, Gemini, Codex) that ended but is cloud-resumable
-        // surfaces a "Continue" tombstone CTA instead of an inline follow-up input. Clicking
-        // Continue clears the finished-viewer read-only state and enables the input, so once the
-        // pane is editable a follow-up must start a new cloud VM (cloud-to-cloud handoff) rather
-        // than be blocked as read-only. While the pane is still read-only (tombstone shown, not yet
-        // continued) this falls through to `UnconnectedReadOnly` below.
+        // A resumed third-party-harness "Continue" tombstone is now an editable pane, so its
+        // follow-up must also start a new cloud VM rather than be blocked as read-only.
         Ok(CloudConversationContinuationUiState::Tombstone {
             cta: Some(TombstoneCta::ContinueInCloud { .. }),
         }) if !terminal_model.is_read_only() => AIQueryRouting::NewCloudVm { task_id },
-        // The run still has an active execution but this pane is not attached as a viewer; treat it
-        // as a live remote VM (never local) so the submission router surfaces stale-pane guidance
-        // rather than letting a follow-up fall through to local submission.
+        // Active execution with no attached viewer: surface stale-pane guidance, never local.
         Err(CloudConversationContinuationError::ActiveTaskExecution) => {
             AIQueryRouting::LiveRemoteVm {
                 is_executor: false,
@@ -274,24 +252,19 @@ pub(crate) fn resolve_ai_query_routing(
 }
 
 /// Whether `task`'s retained setup-failure session presents an editable agent input for the
-/// current principal and routes its submissions through the authenticated run follow-up service
-/// (REMOTE-2661), rather than the read-only no-CTA tombstone or the direct viewer prompt path.
+/// current principal (REMOTE-2661), rather than the read-only tombstone or viewer prompt path.
 ///
 /// Deliberately independent of whether a debug conversation exists yet: PRODUCT.md §7 requires
-/// every later prompt to reuse that conversation through the same authenticated route, so this
-/// must stay true once the first bootstrap persists a conversation ID. Authorization is the same
-/// follow-up check an ordinary owned cloud continuation uses, and the server re-verifies it
-/// before accepting the follow-up.
+/// every later prompt to reuse the same authenticated route once the first bootstrap persists a
+/// conversation ID.
 fn is_retained_setup_failure_debug_editable(task: &AmbientAgentTask, app: &AppContext) -> bool {
     task.is_setup_failure_debug_session_open()
         && task_ownership_access(task, app) == ConversationAccess::Edit
 }
 
-/// Task-id-only entry point for [`is_retained_setup_failure_debug_editable`], for callers (e.g.
-/// the `/agent` slash command's availability gate) that know the ambient task id but do not hold
-/// a locked [`TerminalModel`] the way [`resolve_ai_query_routing`] requires. Returns `false`
-/// (never treats "not yet fetched" as eligible) when the task hasn't been fetched into
-/// [`AgentConversationsModel`] yet, matching `resolve_ai_query_routing`'s own behavior.
+/// Task-id-only entry point for [`is_retained_setup_failure_debug_editable`], for callers that
+/// know the ambient task id but don't hold a locked [`TerminalModel`]. Returns `false` when the
+/// task hasn't been fetched into [`AgentConversationsModel`] yet.
 pub(crate) fn is_retained_setup_failure_debug_editable_for_task(
     task_id: AmbientAgentTaskId,
     app: &AppContext,
@@ -420,12 +393,9 @@ pub(crate) fn completed_child_conversation_access(
     }
 }
 
-/// Whether the current principal may edit a task with no conversation yet: either the exact
-/// person who created it, or — for a team-owned run — a member of the owning team, mirroring
-/// the team-membership check `conversation_access` already applies once a conversation exists.
-/// `creator` is only ever a natural person or service account (never a team; see
-/// `RunCreatorInfoType`), so checking `creator` alone could never recognize another team member
-/// as authorized.
+/// Whether the current principal may edit a task with no conversation yet: either its creator,
+/// or a member of the owning team, mirroring the team check `conversation_access` already
+/// applies once a conversation exists.
 fn task_ownership_access(task: &AmbientAgentTask, app: &AppContext) -> ConversationAccess {
     if is_current_user_on_owning_team(task, app) {
         return ConversationAccess::Edit;

@@ -891,13 +891,10 @@ impl TerminalManager {
                             model.register_ambient_session(terminal_view_id, task_id, ctx);
                         });
 
-                        // REMOTE-2661: `resolve_ai_query_routing`'s retained-setup-failure-debug
-                        // check reads this cache synchronously and must not silently fall back to
-                        // the ordinary live-viewer path just because the task list's own polling
-                        // hasn't reached this task yet (e.g. a viewer who joined via a direct
-                        // session link rather than through the task list). Warm it eagerly here,
-                        // well before the viewer can type anything, instead of leaving routing
-                        // correctness dependent on an incidentally-warm cache.
+                        // REMOTE-2661: `resolve_ai_query_routing` reads this cache synchronously,
+                        // so warm it eagerly here rather than depend on the task list's own
+                        // polling having reached this task already (e.g. a direct session-link
+                        // join, bypassing the task list).
                         AgentConversationsModel::handle(ctx).update(ctx, |model, ctx| {
                             model.get_or_async_fetch_task_data(&task_id, ctx);
                         });

@@ -79,20 +79,16 @@ use crate::workspaces::user_profiles::UserProfileWithUID;
 use crate::{BlocklistAIHistoryModel, GlobalResourceHandlesProvider};
 
 /// How a conversation's status should synchronize to the server `ai_tasks` row via
-/// `LocalAgentTaskSyncModel` (see REMOTE-2661 TECH.md "Mark the conversation as debug-only for
-/// task synchronization").
+/// `LocalAgentTaskSyncModel` (REMOTE-2661).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum TaskSyncMode {
     /// Ordinary conversation: its status drives the task's state and status message.
     #[default]
     Normal,
-    /// A debug conversation bootstrapped with no server conversation token into a retained
-    /// setup-failure session (REMOTE-2661). The conversation ID and debug deadline are still
-    /// reported so live injection and transcript APIs work, but its status must never
-    /// construct a new task status message — the original setup failure record is preserved
-    /// for the retained execution's lifetime. Defense in depth: the server independently
-    /// guards this by comparing the active execution ID (see `BeginTaskProgress`), so a bug
-    /// here cannot reopen the run, but it can still send a redundant/misleading update.
+    /// A debug conversation bootstrapped into a retained setup-failure session. Its
+    /// conversation ID is still reported, but its status must never construct a new task
+    /// status message — the original failure record is preserved. Defense in depth: the
+    /// server independently guards this by comparing the active execution ID.
     PreserveTerminalSetupFailure,
 }
 
@@ -1277,8 +1273,7 @@ impl AIConversation {
     }
 
     /// Sets how this conversation's status synchronizes to the server task row. Called once,
-    /// right after creating a conversation that bootstraps a debug turn into a retained
-    /// setup-failure session with no prior conversation token.
+    /// right after creating a debug-turn bootstrap conversation with no prior token.
     pub fn set_task_sync_mode(&mut self, mode: TaskSyncMode) {
         self.task_sync_mode = mode;
     }

@@ -201,10 +201,8 @@ where
     })
 }
 
-/// Ownership scope for a run: personal (a single user) or team-owned. Mirrors the public
-/// API's `RunItem.scope`, distinct from `creator` (always the natural person who created the
-/// run, never a team) — a team-owned run's other team members are legitimate collaborators on
-/// it despite not being its literal creator.
+/// Ownership scope for a run: personal or team-owned. Mirrors the public API's
+/// `RunItem.scope`; distinct from `creator`, which is never a team.
 #[derive(Clone, Serialize, Deserialize, Debug, PartialEq, Default)]
 pub struct TaskScope {
     #[serde(rename = "type", default)]
@@ -266,19 +264,14 @@ pub struct AmbientAgentTask {
     #[serde(default)]
     pub children: Vec<String>,
 
-    /// Server-computed capability: whether a debug agent may be
-    /// bootstrapped into this run's retained environment-setup-failure session right now. Derived
-    /// server-side from the same eligibility resolver the dispatcher uses (retained execution
-    /// match, both feature flags, an open-or-pinned debug window) plus the batched
-    /// sandbox-reachability signal also used for `is_sandbox_running` — signals this client
-    /// cannot compute on its own. `#[serde(default)]` so an older server that never sends the
-    /// field, or an ineligible run, deserializes to `false`.
+    /// Server-computed: whether a debug agent may be bootstrapped into this run's retained
+    /// environment-setup-failure session right now (REMOTE-2661). `#[serde(default)]` so an
+    /// older or ineligible server deserializes to `false`.
     #[serde(default)]
     pub debug_agent_available: bool,
 
-    /// This run's ownership scope (personal or team). `#[serde(default)]` for an older server
-    /// that never sends it, in which case only the exact literal creator is recognized as
-    /// authorized — the same behavior as before this field existed.
+    /// This run's ownership scope. `#[serde(default)]` for an older server that never sends
+    /// it, in which case only the literal creator is recognized as authorized.
     #[serde(default)]
     pub scope: Option<TaskScope>,
 }
@@ -365,30 +358,15 @@ impl AmbientAgentTask {
     }
 
     /// Whether this run is a retained environment-setup-failure session whose debug window is
-    /// still usable, so a debug prompt may be routed into it (REMOTE-2661).
-    ///
-    /// ANDs the server-computed `debug_agent_available` capability (warp-server#14231) — which
-    /// also accounts for both eligibility feature flags and the batched sandbox-reachability
-    /// signal, neither of which the client can see — with the client-observable failure
-    /// conditions. It defaults to `false` on an older server, so this fails closed. An active
-    /// turn keeps the session usable past the last published deadline (PRODUCT.md §1, §24),
-    /// which the deadline alone cannot express because the sharer stops sliding it while pinned.
-    /// The server remains the sole authority: it independently re-verifies eligibility before
-    /// accepting a debug follow-up, so this only decides what the client presents and where a
-    /// submission goes.
+    /// still usable, so a debug prompt may be routed into it (REMOTE-2661). The server is the
+    /// sole authority here and re-verifies eligibility before accepting a follow-up; this only
+    /// decides what the client presents and where a submission goes.
     pub fn is_setup_failure_debug_session_open(&self) -> bool {
         self.debug_agent_available
-            && self.state.is_failure_like()
-            && self.status_message.as_ref().is_some_and(|status_message| {
-                status_message.is_environment_setup_failure()
-                    && (status_message.is_debug_window_open(Utc::now())
-                        || status_message.debug_agent_active)
-            })
     }
 
-    /// Whether a debug conversation may still be *bootstrapped* into this retained session, i.e.
-    /// none exists yet. A later prompt reuses the persisted conversation instead, and is routed
-    /// by [`Self::is_setup_failure_debug_session_open`] alone.
+    /// Whether a debug conversation may still be *bootstrapped* into this session, i.e. none
+    /// exists yet. A later prompt reuses the persisted conversation instead.
     pub fn is_open_for_setup_failure_debug_bootstrap(&self) -> bool {
         self.is_setup_failure_debug_session_open() && self.conversation_id().is_none()
     }
@@ -629,15 +607,12 @@ pub struct TaskStatusMessage {
     pub message: String,
     #[serde(default, alias = "errorCode")]
     pub error_code: Option<TaskStatusErrorCode>,
-    /// The deadline of an open post-failure debug window (REMOTE-2208/REMOTE-2661), if the
-    /// server is currently holding one open for this run. `#[serde(default)]` so an older
-    /// server that never sends the field, or a run with no open window, deserializes to `None`
-    /// — which callers must treat as "no debug window is known to be open", not as an error.
+    /// Deadline of an open post-failure debug window (REMOTE-2208/REMOTE-2661), if the server
+    /// is holding one open. `#[serde(default)]`; `None` means no window is known to be open.
     #[serde(default)]
     pub session_debug_until: Option<DateTime<Utc>>,
-    /// True while a REMOTE-2661 debug turn is actively pinning the idle timer. Display-only and
-    /// separate from `session_debug_until`, which can lag while pinned (see
-    /// `DebugWindowController`). `#[serde(default)]` for older servers / no active turn.
+    /// True while a REMOTE-2661 debug turn is actively pinning the idle timer. Display-only;
+    /// can outlast an expired `session_debug_until` while pinned.
     #[serde(default, alias = "debugAgentActive")]
     pub debug_agent_active: bool,
 }
@@ -662,14 +637,6 @@ impl TaskStatusMessage {
         self.error_code
             .as_ref()
             .is_some_and(TaskStatusErrorCode::is_environment_setup_failure)
-    }
-
-    /// Whether the server has reported a post-failure debug window that has not yet passed
-    /// `now`. `false` for a run with no reported window (including an older server that never
-    /// sends `session_debug_until`) — callers must fail closed rather than assume an open window.
-    pub fn is_debug_window_open(&self, now: DateTime<Utc>) -> bool {
-        self.session_debug_until
-            .is_some_and(|deadline| deadline > now)
     }
 }
 

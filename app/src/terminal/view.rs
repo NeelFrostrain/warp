@@ -21634,13 +21634,12 @@ impl TerminalView {
     }
 
     /// Submits a follow-up through the run follow-up service for the REMOTE-2661 retained
-    /// setup-failure debug route. Mirrors [`Self::try_submit_pending_cloud_followup`]'s shape,
-    /// but is not gated by `HandoffCloudCloud`: every authenticated follow-up origin uses this
-    /// one retained-session route regardless of that flag's rollout state, since the server
-    /// alone decides whether the follow-up bootstraps a debug conversation or starts a new VM.
+    /// setup-failure debug route. Unlike [`Self::try_submit_pending_cloud_followup`], not gated
+    /// by `HandoffCloudCloud`: the server alone decides whether it bootstraps a debug
+    /// conversation or starts a new VM.
     ///
-    /// Returns `false` when the follow-up could not be routed at all (no bound ambient view
-    /// model, or one bound to a different task), in which case the caller shows an error toast.
+    /// Returns `false` when the follow-up couldn't be routed (no bound ambient view model, or
+    /// one bound to a different task); the caller then shows an error toast.
     fn try_submit_setup_failure_debug_followup(
         &mut self,
         task_id: crate::ai::ambient_agents::AmbientAgentTaskId,

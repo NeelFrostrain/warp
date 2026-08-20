@@ -3,12 +3,9 @@ use crate::request_context::RequestContext;
 use crate::response_context::ResponseContext;
 use crate::schema;
 
-/// A GraphQL query the sharer (retained agent process) uses to authorize a no-token
-/// REMOTE-2661 debug agent prompt against a retained environment-setup-failure session.
-/// Authenticated by the sharer's own workload token rather than the requesting
-/// participant's credentials, since the sharer has no way to authenticate that participant
-/// itself — it only has the `firebase_uid` the session-sharing presence list reports for
-/// them, which the server independently verifies against its own authorization records.
+/// A GraphQL query the sharer uses to authorize a no-token REMOTE-2661 debug agent prompt
+/// against a retained environment-setup-failure session. Authenticated by the sharer's own
+/// workload token, since it has no way to authenticate the requesting participant itself.
 #[derive(cynic::QueryFragment, Debug)]
 #[cynic(
     graphql_type = "RootQuery",

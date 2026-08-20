@@ -922,18 +922,10 @@ impl AmbientAgentViewModel {
 
     /// Submits a follow-up into a retained environment-setup-failure debug session
     /// (REMOTE-2661), via the same authenticated `submit_run_followup` service call as
-    /// [`Self::submit_cloud_followup`] but *not* gated on `HandoffCloudCloud`, and *not* routed
-    /// through [`Self::submit_run_followup_unchecked`]'s task-state polling.
-    ///
-    /// That polling waits for `task.state.is_working()` before it will report anything, to avoid
-    /// misreporting an ordinary cloud-to-cloud follow-up's stale prior-terminal-state as this
-    /// follow-up's own outcome. A retained debug session is different: its task is *supposed* to
-    /// stay in a failure-like state for the whole debug conversation (the run itself keeps
-    /// reporting failure; only the sandbox is kept alive), so `is_working()` never becomes true
-    /// and that polling would eventually give up and misreport the stale failure as this
-    /// follow-up's outcome — even though the debug conversation is actually succeeding via the
-    /// ordinary conversation/exchange stream. Instead, treat this as sent once the server accepts
-    /// the request; the conversation UI renders the response independently of `status`.
+    /// [`Self::submit_cloud_followup`] but not gated on `HandoffCloudCloud`, and not routed
+    /// through [`Self::submit_run_followup_unchecked`]'s task-state polling: a retained run's
+    /// task is supposed to stay failure-like for the whole debug conversation, so that polling
+    /// would eventually misreport it. Treat this as sent once the server accepts the request.
     pub fn submit_setup_failure_debug_followup(
         &mut self,
         prompt: String,
@@ -1606,11 +1598,9 @@ pub enum AmbientAgentViewModelEvent {
     Failed {
         error_message: String,
     },
-    /// A retained-setup-failure debug follow-up (REMOTE-2661) failed to submit. Deliberately
-    /// distinct from `Failed`: the underlying run's own failure state is expected to persist for
-    /// the whole debug session, so this must not trigger the same tombstone/conversation-error
-    /// handling `Failed` does — it only needs a lightweight signal that this one message didn't
-    /// go through.
+    /// A retained-setup-failure debug follow-up (REMOTE-2661) failed to submit. Distinct from
+    /// `Failed`: the run's failure state is expected to persist, so this is just a lightweight
+    /// signal that this one message didn't go through.
     FollowupSubmissionFailed {
         error_message: String,
     },

@@ -1047,9 +1047,9 @@ pub enum Event {
     SubmitCloudFollowup {
         prompt: String,
     },
-    /// A retained environment-setup-failure debug tombstone (REMOTE-2661), or an already
-    /// attached live viewer of one, is requesting to submit a debug follow-up through the
-    /// authenticated run follow-up service, never the direct viewer prompt path.
+    /// A retained environment-setup-failure pane, or an already attached live viewer of one,
+    /// is requesting a debug follow-up through the authenticated run follow-up service
+    /// (REMOTE-2661).
     SubmitSetupFailureDebugFollowup {
         task_id: crate::ai::ambient_agents::AmbientAgentTaskId,
         prompt: String,
@@ -4186,12 +4186,9 @@ impl Input {
 
     /// Blocks a submission for `task_id` while that task is not in [`AgentConversationsModel`]
     /// yet, starting (or deduping) its fetch and telling the user to retry (REMOTE-2661).
-    ///
-    /// `resolve_ai_query_routing` can only answer "eligible for the retained setup-failure debug
-    /// route" once the task is cached; an absent task is indistinguishable from a genuinely
-    /// ineligible one. Treating unknown as ineligible would fall back to the direct viewer path
-    /// or to a brand-new local conversation, both of which this feature deliberately closes, so
-    /// this fails closed instead. Returns `true` when the caller must stop.
+    /// `resolve_ai_query_routing` can't distinguish an absent task from an ineligible one, and
+    /// treating unknown as ineligible would wrongly fall back to a local conversation. Returns
+    /// `true` when the caller must stop.
     fn block_submission_while_ambient_task_unresolved(
         &self,
         task_id: Option<AmbientAgentTaskId>,
@@ -4243,9 +4240,8 @@ impl Input {
             return false;
         }
 
-        // Scoped to an attached ambient live viewer, the one case where unresolved eligibility
-        // would otherwise fall through to the ordinary `LiveRemoteVm` path; a composing pane with
-        // no ambient task yet is unaffected.
+        // Scoped to an attached ambient live viewer, the case where unresolved eligibility
+        // would otherwise fall through to the ordinary `LiveRemoteVm` path.
         let is_attached_ambient_viewer = {
             let model = self.model.lock();
             model.shared_session_status().is_active_viewer()
@@ -4348,8 +4344,7 @@ impl Input {
                 true
             }
             AIQueryRouting::RetainedSetupFailureDebug { task_id } => {
-                // Every authenticated origin — the tombstone's own input and an already-attached
-                // live viewer alike — converges on the same authenticated follow-up service call,
+                // Every authenticated origin converges on the same follow-up service call,
                 // never the direct viewer prompt path or the local agent (REMOTE-2661).
                 let prompt = self.editor.as_ref(ctx).buffer_text(ctx).trim().to_owned();
                 ctx.emit(Event::SubmitSetupFailureDebugFollowup { task_id, prompt });

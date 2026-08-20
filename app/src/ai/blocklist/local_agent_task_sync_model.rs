@@ -232,11 +232,9 @@ impl LocalAgentTaskSyncModel {
                     }
                 }
 
-                // A debug conversation bootstrapped into a retained setup-failure session must
-                // keep reporting its conversation ID (live injection and transcript APIs depend
-                // on it) without deriving task state or a status message from its own status —
-                // that would overwrite the original failure record. See
-                // `TaskSyncMode::PreserveTerminalSetupFailure`.
+                // A debug conversation still reports its conversation ID, but must not derive
+                // task state/status from its own status — that would overwrite the original
+                // failure record. See `TaskSyncMode::PreserveTerminalSetupFailure`.
                 let (task_state, status_message) = if conversation
                     .task_sync_mode()
                     .suppresses_task_lifecycle_updates()

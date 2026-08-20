@@ -631,12 +631,12 @@ fn environment_setup_failure_with_conversation_shows_continue_cta() {
     });
 }
 
-/// Debug routing requires the real, server-computed `debug_agent_available` capability
-/// (REMOTE-2661/warp-server#14231), not just the client-observable proxy conditions
-/// (failure-like state, `ENVIRONMENT_SETUP_FAILED`, no conversation, an open
-/// `session_debug_until` window, and creator access). An older/ineligible server response
-/// defaults `debug_agent_available` to `false`, so this must fail closed rather than trusting
-/// the proxy alone. A setup-failure tombstone never carries a CTA either way.
+/// Debug routing trusts the server-computed `debug_agent_available` capability
+/// (REMOTE-2661/warp-server#14231) entirely — it is not re-derived from `session_debug_until`
+/// or `debug_agent_active` client-side. An older/ineligible server response defaults
+/// `debug_agent_available` to `false`, so a task that otherwise looks eligible (failure-like
+/// state, `ENVIRONMENT_SETUP_FAILED`, an open `session_debug_until` window) must still fail
+/// closed. A setup-failure tombstone never carries a CTA either way.
 #[test]
 fn retained_setup_failure_without_debug_agent_available_is_not_debug_routable() {
     App::test((), |mut app| async move {
@@ -767,8 +767,10 @@ fn retained_setup_failure_with_a_conversation_still_routes_to_the_debug_followup
 }
 
 /// PRODUCT.md §1 and §24: an active debug turn pins the idle timer, so the published deadline
-/// stops sliding and can fall behind. The entry point must stay open on the strength of
-/// `debug_agent_active` alone, or a long autonomous turn loses the input it is running in.
+/// (and thus `session_debug_until`) stops sliding and can fall behind. The client must not
+/// re-derive eligibility from that stale deadline itself — it trusts `debug_agent_available`
+/// as computed by the server, which already accounts for the pin — or a long autonomous turn
+/// loses the input it is running in.
 #[test]
 fn retained_setup_failure_stays_eligible_while_a_debug_turn_pins_the_window() {
     App::test((), |mut app| async move {

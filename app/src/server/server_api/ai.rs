@@ -1229,13 +1229,8 @@ pub trait AIClient: 'static + Send + Sync {
     /// Updates a run's server-side record. Every argument is independently optional; omitted
     /// fields are left untouched rather than cleared.
     ///
-    /// `session_debug_until` is the deadline of an open post-failure debug window. It is
-    /// deliberately separate from `status_message` so a refresh can move the deadline without
-    /// rewriting the failure text the run reported.
-    ///
-    /// `debug_agent_active` is whether a REMOTE-2661 debug turn is actively pinning that window.
-    /// Also deliberately separate from `status_message`/`session_debug_until` for the same
-    /// reason: a pin/unpin update must not overwrite the failure text or move the deadline.
+    /// `session_debug_until` and `debug_agent_active` (REMOTE-2661) are kept separate from
+    /// `status_message` so a deadline or pin/unpin update never overwrites the failure text.
     #[allow(clippy::too_many_arguments)]
     async fn update_agent_task(
         &self,
@@ -1439,11 +1434,8 @@ pub trait AIClient: 'static + Send + Sync {
     ) -> anyhow::Result<Vec<GitCredential>, anyhow::Error>;
 
     /// Authorizes a REMOTE-2661 debug agent prompt against a retained environment-setup-failure
-    /// session, called by the sharer with its own workload token and the requesting
-    /// participant's `firebase_uid` (resolved locally from the session-sharing presence list).
-    /// The server is the sole source of truth: any outcome other than
-    /// `Ok(true)` (an explicit denial, a `UserFacingError`, or a transport/network error) means
-    /// the caller must reject the prompt — there is no client-side fallback.
+    /// session, called by the sharer with its own workload token. Anything short of `Ok(true)`
+    /// means the caller must reject the prompt.
     async fn setup_failure_debug_authorization(
         &self,
         task_id: AmbientAgentTaskId,

@@ -86,13 +86,10 @@ fn should_skip_sharer_op(is_ambient_session: bool, op: &CrdtOperation) -> bool {
 }
 
 /// Decides whether a no-token agent prompt should be honored against a retained
-/// environment-setup-failure debug session, per the REMOTE-2661 `setupFailureDebugAuthorization`
-/// server callback (see the sharer's `AgentPromptRequested` handling). The sharer cannot
-/// authenticate the requesting participant itself, so this is the sole authority: every outcome
-/// other than an explicit `Ok(true)` from the server -- an unresolvable participant UID, a
-/// denied authorization, a `UserFacingError`, or the call failing outright (including a
-/// workload-token issuance failure) -- rejects the prompt. There is deliberately no local
-/// fallback.
+/// environment-setup-failure debug session, via the REMOTE-2661
+/// `setupFailureDebugAuthorization` server callback. The sharer cannot authenticate the
+/// participant itself, so anything short of an explicit `Ok(true)` rejects the prompt —
+/// deliberately no local fallback.
 async fn is_setup_failure_debug_prompt_authorized(
     ai_client: &Arc<dyn crate::server::server_api::ai::AIClient>,
     task_id: crate::ai::ambient_agents::AmbientAgentTaskId,
@@ -115,11 +112,8 @@ async fn is_setup_failure_debug_prompt_authorized(
 }
 
 /// Honors an already-authorized agent prompt: writes it to the CLI harness PTY when one is
-/// active, or executes it against the Oz harness otherwise.
-///
-/// Callers must have already established that `participant_id` is allowed to submit this
-/// prompt (permissions/AI-enabled checks, and for a no-token REMOTE-2661 debug bootstrap, the
-/// `setupFailureDebugAuthorization` server callback) before calling this.
+/// active, or executes it against the Oz harness otherwise. Callers must have already checked
+/// that `participant_id` may submit this prompt.
 fn accept_agent_prompt(
     terminal_view: &ViewHandle<TerminalView>,
     request: AgentPromptRequest,
@@ -1434,14 +1428,10 @@ impl TerminalManager<TerminalView> {
                         return;
                     }
 
-                    // REMOTE-2661: a no-token prompt is how a debug conversation gets
-                    // bootstrapped into a retained environment-setup-failure session. The
-                    // sharer cannot authenticate who is actually asking on its own -- it only
-                    // knows the participant's `firebase_uid` as reported by the session-sharing
-                    // presence list, which is not itself a credential. So a no-token prompt
-                    // against a retained, eligible session must be authorized by the server's
-                    // `setupFailureDebugAuthorization` callback before being honored; there is
-                    // no local fallback if that call is unavailable, errors, or denies.
+                    // REMOTE-2661: a no-token prompt is how a debug conversation bootstraps
+                    // into a retained setup-failure session. The sharer only knows the
+                    // participant's firebase_uid from presence, not a credential, so this must
+                    // be authorized by the server before being honored.
                     if request.server_conversation_token.is_none() {
                         let task_id = model.lock().ambient_agent_task_id().filter(|task_id| {
                             AgentConversationsModel::as_ref(ctx)

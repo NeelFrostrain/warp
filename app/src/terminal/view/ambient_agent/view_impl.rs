@@ -277,10 +277,8 @@ impl TerminalView {
                 ctx.notify();
             }
             AmbientAgentViewModelEvent::FollowupSubmissionFailed { error_message } => {
-                // REMOTE-2661: unlike `Failed`, the retained session's own failure state is
-                // expected to persist for the whole debug conversation, so this must not
-                // re-insert a tombstone or mark the conversation as errored — just tell the
-                // user this one message didn't go through.
+                // Unlike `Failed`, the retained session's failure state persists by design, so
+                // this must not re-insert a tombstone or mark the conversation as errored.
                 self.show_error_toast(
                     format!("Couldn't send your message to the retained session: {error_message}"),
                     ctx,

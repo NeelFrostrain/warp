@@ -204,12 +204,9 @@ impl GuiSlashCommandDataSource {
             availability |= Availability::CLOUD_MODE_V2_COMPOSER;
         }
 
-        // REMOTE-2661: a retained environment-setup-failure session has no conversation to
-        // continue, so it must not be gated as an ordinary cloud-agent pane -- from the slash
-        // command's perspective, this is exactly the "no active conversation, need to start
-        // one" case `NOT_CLOUD_AGENT` already exists for, just entered through the debug
-        // follow-up path instead of a brand-new local conversation. `execute_slash_command`
-        // routes `/agent`/`/new` through the authenticated follow-up service for this case.
+        // REMOTE-2661: a retained setup-failure session has no conversation to continue, so it
+        // gates like the ordinary "no active conversation" case; `execute_slash_command` routes
+        // `/agent`/`/new` through the authenticated follow-up service for this pane.
         let is_retained_setup_failure_debug_pane = self
             .ambient_agent_view_model
             .as_ref()

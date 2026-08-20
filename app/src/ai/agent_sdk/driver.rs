@@ -356,13 +356,8 @@ impl<T: Clone + Send + 'static> IdleTimeoutSender<T> {
 }
 
 /// Owns the post-failure debug window's idle deadline and the set of debug-turn conversations
-/// currently pinning it open, for the retained setup-failure lingering path (REMOTE-2661).
-///
-/// A "turn" is a debug conversation (identified by its [`AIConversationId`]) with an
-/// in-progress exchange running against the retained session. The idle timer is free to expire
-/// only when no turn is pinning it. Idempotent by turn ID: pinning an already-pinned turn, or
-/// finishing an unpinned/unknown turn, is a no-op — duplicate conversation-status events can
-/// never leak a pin or shorten the window.
+/// pinning it open, for the retained setup-failure lingering path (REMOTE-2661). The idle timer
+/// is free to expire only when no turn is pinning it. Idempotent by turn ID.
 struct DebugWindowController<T: Clone + Send + 'static> {
     idle_timeout: IdleTimeoutSender<T>,
     active_turns: Arc<Mutex<HashSet<AIConversationId>>>,
@@ -393,9 +388,8 @@ impl<T: Clone + Send + 'static> DebugWindowController<T> {
             .is_ok_and(|turns| !turns.is_empty())
     }
 
-    /// Arms or moves the idle deadline. No-op while a debug turn is pinning the window, since
-    /// the deadline must not slide out from under a turn that is about to finish and re-arm it
-    /// with the full interval anyway. Returns whether the deadline was actually armed.
+    /// Arms or moves the idle deadline. No-op while pinned, since the deadline must not slide
+    /// out from under a turn about to finish and re-arm it anyway. Returns whether it armed.
     fn refresh_idle(&self, value: T, window: Duration) -> bool {
         if self.is_pinned() {
             return false;
@@ -404,8 +398,8 @@ impl<T: Clone + Send + 'static> DebugWindowController<T> {
         true
     }
 
-    /// Pushes a previously armed deadline out by its original window, as long as the window
-    /// isn't pinned. Used for keystroke-level viewer-input refreshes.
+    /// Pushes a previously armed deadline out by its original window, unless pinned. Used for
+    /// keystroke-level viewer-input refreshes.
     fn refresh_from_last_armed(&self) -> Option<Duration> {
         if self.is_pinned() {
             return None;
@@ -414,8 +408,7 @@ impl<T: Clone + Send + 'static> DebugWindowController<T> {
     }
 
     /// Cancels the idle expiry while at least one debug turn is active. Returns `true` only when
-    /// this call actually added a new active turn (a duplicate call with the same turn ID is a
-    /// no-op).
+    /// this call added a new active turn.
     fn pin_for_turn(&self, turn_id: AIConversationId) -> bool {
         let Ok(mut turns) = self.active_turns.lock() else {
             return false;
@@ -430,7 +423,7 @@ impl<T: Clone + Send + 'static> DebugWindowController<T> {
     }
 
     /// Removes the pin for `turn_id`, re-arming a full idle window once the last active turn
-    /// ends. Returns `false` for a duplicate or unknown turn ID (idempotent).
+    /// ends. Returns `false` for a duplicate or unknown turn ID.
     fn finish_turn(&self, turn_id: AIConversationId, value: T, window: Duration) -> bool {
         let Ok(mut turns) = self.active_turns.lock() else {
             return false;
@@ -457,9 +450,7 @@ fn setup_failure_status_update(message: String) -> TaskStatusUpdate {
 }
 
 /// The post-failure debug window's deadline, `window` from now. Shared by
-/// `report_failure_before_lingering` (the window's first announcement) and
-/// `publish_debug_window_deadline` (its ongoing publish/refresh) so both compute the same
-/// deadline the same way.
+/// `report_failure_before_lingering` and `publish_debug_window_deadline` so both agree.
 fn debug_window_deadline(window: Duration) -> DateTime<Utc> {
     Utc::now() + chrono::Duration::from_std(window).unwrap_or_default()
 }
@@ -3184,9 +3175,8 @@ impl AgentDriver {
     }
 
     /// Subscribes the terminal driver's viewer-input events to `refresh`, publishing the
-    /// resulting deadline whenever a keystroke moves it. Callers supply the refresh function so a
-    /// pin-aware one (`DebugWindowController::refresh_from_last_armed`, inert while a debug turn
-    /// pins the window) and a plain one (`IdleTimeoutSender::refresh`) can share this wiring.
+    /// resulting deadline on each keystroke. Callers supply the refresh function so a pin-aware
+    /// one and a plain one can share this wiring.
     fn subscribe_to_viewer_input_refresh(
         &self,
         ctx: &mut ModelContext<Self>,
@@ -3208,10 +3198,8 @@ impl AgentDriver {
     /// Arms the post-failure debug window for a retained environment-setup failure and installs
     /// the subscriptions that keep it alive across a debug turn (REMOTE-2661).
     ///
-    /// Unlike [`Self::arm_debug_window`], no conversation exists yet here: the window must
-    /// survive a debug conversation being bootstrapped into the retained session with no viewer
-    /// input of its own to refresh it, so a turn pins it for its duration (accepted → terminal)
-    /// and re-arms the full interval when it ends.
+    /// Unlike [`Self::arm_debug_window`], no conversation exists yet: a turn pins the window for
+    /// its duration (accepted → terminal) since there's no viewer input to refresh it otherwise.
     fn arm_setup_failure_debug_window(
         &mut self,
         controller: DebugWindowController<()>,
@@ -3219,8 +3207,8 @@ impl AgentDriver {
         ctx: &mut ModelContext<Self>,
     ) {
         controller.refresh_idle((), window);
-        // The first deadline already went out with the setup-failure state
-        // (`report_failure_before_lingering`); record it so the throttle counts it as published.
+        // The first deadline already went out with the setup-failure state; record it so the
+        // throttle counts it as published.
         self.last_published_debug_deadline = Some(SystemTime::now());
 
         let terminal_surface_id = self.terminal_driver.as_ref(ctx).terminal_view().id();
@@ -3279,13 +3267,11 @@ impl AgentDriver {
         });
     }
 
-    /// Publishes the debug window's current deadline for display on run surfaces, and
-    /// optionally the REMOTE-2661 `debug_agent_active` pin flag alongside it.
+    /// Publishes the debug window's current deadline for display, and optionally the
+    /// REMOTE-2661 `debug_agent_active` pin flag alongside it.
     ///
-    /// The deadline publish is throttled, since the window refreshes on keystroke-level events;
-    /// the published value is advisory and lags the real deadline conservatively, since the agent
-    /// process owns the timer. `debug_agent_active`, when `Some`, is never throttled: a pin/unpin
-    /// transition is a discrete state change, not a sliding value.
+    /// The deadline is throttled and advisory, since the agent process owns the real timer.
+    /// `debug_agent_active`, when `Some`, is never throttled: a pin/unpin is a discrete change.
     fn publish_debug_window_deadline(
         &mut self,
         window: Duration,
@@ -3308,9 +3294,8 @@ impl AgentDriver {
         }
         self.last_published_debug_deadline = Some(now);
 
-        // A throttled deadline republish still needs a value to send; reuse the current window
-        // rather than omitting `session_debug_until`, which would otherwise pair a
-        // `debug_agent_active`-only update with no deadline at all.
+        // A throttled republish still needs a deadline value, so a debug_agent_active-only
+        // update doesn't omit `session_debug_until` entirely.
         let deadline = debug_window_deadline(window);
         let (task_state, debug_turn_id) = debug_turn
             .map(|(state, turn_id)| (Some(state), Some(turn_id.to_string())))
@@ -3341,14 +3326,12 @@ impl AgentDriver {
         );
     }
 
-    /// Reports the run's terminal failure state, its status message, and the debug window's first
-    /// deadline in one update.
+    /// Reports the run's terminal failure state, its status message, and the debug window's
+    /// first deadline in one update, so the server never sees a terminal setup failure without
+    /// also knowing a debug window is opening.
     ///
-    /// A setup failure never creates a conversation, so `LocalAgentTaskSyncModel` — which derives
-    /// task state from conversation status — never fires for it, and the run would otherwise read
-    /// as in-progress for the whole window. Carrying the deadline in the same update leaves no
-    /// interval in which the server sees a terminal setup failure without knowing that a debug
-    /// window is opening.
+    /// A setup failure never creates a conversation, so `LocalAgentTaskSyncModel` never derives
+    /// task state for it, and the run would otherwise read as in-progress for the whole window.
     async fn report_failure_before_lingering(
         foreground: &ModelSpawner<Self>,
         stage: &str,
