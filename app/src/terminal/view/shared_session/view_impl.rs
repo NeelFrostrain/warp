@@ -1006,20 +1006,6 @@ impl TerminalView {
         ctx.notify();
     }
 
-    /// Enables the tombstone's agent input for a retained environment-setup-failure debug
-    /// session (REMOTE-2661). Not gated by `HandoffCloudCloud`: submission still routes through
-    /// `AIQueryRouting::RetainedSetupFailureDebug` and the authenticated follow-up service
-    /// regardless of that unrelated flag's rollout state.
-    fn start_setup_failure_debug_from_tombstone(
-        &mut self,
-        task_id: crate::ai::ambient_agents::AmbientAgentTaskId,
-        ctx: &mut ViewContext<Self>,
-    ) {
-        self.enable_cloud_followup_input_after_conversation_end(task_id, ctx);
-        self.focus_input_box(ctx);
-        ctx.notify();
-    }
-
     pub fn handle_inactivity_modal_event(
         &mut self,
         event: &InactivityModalEvent,
@@ -1853,9 +1839,6 @@ impl TerminalView {
         ctx.subscribe_to_view(&tombstone_view_handle, |me, _, event, ctx| match event {
             ConversationEndedTombstoneEvent::ContinueInCloud { task_id } => {
                 me.start_cloud_followup_from_tombstone(*task_id, ctx);
-            }
-            ConversationEndedTombstoneEvent::DebugRetainedSetupFailure { task_id } => {
-                me.start_setup_failure_debug_from_tombstone(*task_id, ctx);
             }
         });
         let tombstone_view_id = tombstone_view_handle.id();

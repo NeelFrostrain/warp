@@ -266,13 +266,13 @@ pub struct AmbientAgentTask {
     #[serde(default)]
     pub children: Vec<String>,
 
-    /// Server-computed capability (REMOTE-2661, warp-server#14231): whether a debug agent may be
+    /// Server-computed capability: whether a debug agent may be
     /// bootstrapped into this run's retained environment-setup-failure session right now. Derived
     /// server-side from the same eligibility resolver the dispatcher uses (retained execution
     /// match, both feature flags, an open-or-pinned debug window) plus the batched
     /// sandbox-reachability signal also used for `is_sandbox_running` — signals this client
     /// cannot compute on its own. `#[serde(default)]` so an older server that never sends the
-    /// field, or an ineligible run, deserializes to `false` (fail closed).
+    /// field, or an ineligible run, deserializes to `false`.
     #[serde(default)]
     pub debug_agent_available: bool,
 

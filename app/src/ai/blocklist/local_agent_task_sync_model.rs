@@ -340,6 +340,7 @@ impl LocalAgentTaskSyncModel {
                         status_message,
                         None,
                         None,
+                        None,
                     )
                     .await;
                 if let Err(err) = &result {

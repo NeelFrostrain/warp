@@ -1246,6 +1246,7 @@ pub trait AIClient: 'static + Send + Sync {
         status_message: Option<TaskStatusUpdate>,
         session_debug_until: Option<DateTime<Utc>>,
         debug_agent_active: Option<bool>,
+        debug_turn_id: Option<String>,
     ) -> anyhow::Result<(), anyhow::Error>;
 
     async fn spawn_agent(
@@ -2173,6 +2174,7 @@ impl AIClient for ServerApi {
         status_message: Option<TaskStatusUpdate>,
         session_debug_until: Option<DateTime<Utc>>,
         debug_agent_active: Option<bool>,
+        debug_turn_id: Option<String>,
     ) -> anyhow::Result<(), anyhow::Error> {
         let variables = UpdateAgentTaskVariables {
             input: UpdateAgentTaskInput {
@@ -2186,6 +2188,7 @@ impl AIClient for ServerApi {
                 }),
                 session_debug_until: session_debug_until.map(Into::into),
                 debug_agent_active,
+                debug_turn_id: debug_turn_id.map(Into::into),
             },
             request_context: get_request_context(),
         };

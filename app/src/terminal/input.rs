@@ -321,7 +321,9 @@ use crate::terminal::view::ambient_agent::{
     HarnessSelector, HarnessSelectorEvent, HostSelector, HostSelectorEvent, NakedHeaderButtonTheme,
 };
 use crate::terminal::view::inline_banner::{PromptSuggestionsEvent, PromptSuggestionsView};
-use crate::terminal::view::{AIQueryRouting, CodeDiffAction, resolve_ai_query_routing};
+use crate::terminal::view::{
+    AIQueryRouting, CodeDiffAction, resolve_ai_query_routing, resolve_ambient_agent_task_id,
+};
 use crate::ui_components::blended_colors;
 use crate::ui_components::icons::Icon;
 use crate::user_config::WarpConfig;
@@ -4179,9 +4181,7 @@ impl Input {
 
     /// The ambient agent run this pane belongs to, if any.
     fn ambient_agent_task_id(&self, ctx: &AppContext) -> Option<AmbientAgentTaskId> {
-        self.ambient_agent_view_model()
-            .and_then(|model| model.as_ref(ctx).task_id())
-            .or_else(|| self.model.lock().ambient_agent_task_id())
+        resolve_ambient_agent_task_id(self.ambient_agent_view_model(), &self.model.lock(), ctx)
     }
 
     /// Blocks a submission for `task_id` while that task is not in [`AgentConversationsModel`]

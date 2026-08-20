@@ -100,6 +100,7 @@ impl ClaudeHarness {
                 None,
                 None,
                 None,
+                None,
             )
             .await
             .map_err(|err| {

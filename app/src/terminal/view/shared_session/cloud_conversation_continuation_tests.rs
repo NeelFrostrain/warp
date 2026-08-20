@@ -631,14 +631,14 @@ fn environment_setup_failure_with_conversation_shows_continue_cta() {
     });
 }
 
-/// The debug tombstone CTA and routing require the real, server-computed
-/// `debug_agent_available` capability (REMOTE-2661/warp-server#14231), not just the
-/// client-observable proxy conditions (failure-like state, `ENVIRONMENT_SETUP_FAILED`, no
-/// conversation, an open `session_debug_until` window, and creator access). An older/ineligible
-/// server response defaults `debug_agent_available` to `false`, so this must fail closed to the
-/// ordinary no-CTA tombstone rather than trusting the proxy alone.
+/// Debug routing requires the real, server-computed `debug_agent_available` capability
+/// (REMOTE-2661/warp-server#14231), not just the client-observable proxy conditions
+/// (failure-like state, `ENVIRONMENT_SETUP_FAILED`, no conversation, an open
+/// `session_debug_until` window, and creator access). An older/ineligible server response
+/// defaults `debug_agent_available` to `false`, so this must fail closed rather than trusting
+/// the proxy alone. A setup-failure tombstone never carries a CTA either way.
 #[test]
-fn retained_setup_failure_without_debug_agent_available_shows_plain_tombstone() {
+fn retained_setup_failure_without_debug_agent_available_is_not_debug_routable() {
     App::test((), |mut app| async move {
         let TestHandles {
             terminal_view_id,
@@ -680,10 +680,11 @@ fn retained_setup_failure_without_debug_agent_available_shows_plain_tombstone() 
     });
 }
 
-/// Once `debug_agent_available` is true (server-eligible) and the other conditions hold, both the
-/// tombstone CTA and the pane's follow-up routing must switch to the REMOTE-2661 debug path.
+/// Once `debug_agent_available` is true (server-eligible) and the other conditions hold, the
+/// pane's follow-up routing must switch to the REMOTE-2661 debug path. The tombstone itself
+/// stays plain: the debug entry point is the pane's own input, not a CTA button.
 #[test]
-fn retained_setup_failure_with_debug_agent_available_shows_debug_cta_and_routing() {
+fn retained_setup_failure_with_debug_agent_available_enables_debug_routing() {
     App::test((), |mut app| async move {
         let TestHandles {
             terminal_view_id,
@@ -713,9 +714,7 @@ fn retained_setup_failure_with_debug_agent_available_shows_debug_cta_and_routing
                 resolve_cloud_conversation_continuation_ui_state(terminal_view_id, task_id, ctx);
             assert_eq!(
                 state,
-                Ok(CloudConversationContinuationUiState::Tombstone {
-                    cta: Some(TombstoneCta::DebugRetainedSetupFailure { task_id }),
-                })
+                Ok(CloudConversationContinuationUiState::Tombstone { cta: None })
             );
 
             let model = ambient_pane_model(task_id, SharedSessionStatus::NotShared);
@@ -797,26 +796,25 @@ fn retained_setup_failure_stays_eligible_while_a_debug_turn_pins_the_window() {
         });
 
         app.update(|ctx| {
+            let model = ambient_pane_model(task_id, SharedSessionStatus::NotShared);
             assert_eq!(
-                resolve_cloud_conversation_continuation_ui_state(terminal_view_id, task_id, ctx),
-                Ok(CloudConversationContinuationUiState::Tombstone {
-                    cta: Some(TombstoneCta::DebugRetainedSetupFailure { task_id }),
-                }),
+                resolve_ai_query_routing(terminal_view_id, None, &model, ctx),
+                AIQueryRouting::RetainedSetupFailureDebug { task_id },
                 "a pinned debug turn must keep the entry point open past the published deadline"
             );
         });
     });
 }
 
-/// A team-owned retained setup-failure run must offer the Debug CTA to a team member who is
-/// not the literal creator, mirroring the pre-existing team-ownership recognition
+/// A team-owned retained setup-failure run must be debug-routable for a team member who is not
+/// the literal creator, mirroring the pre-existing team-ownership recognition
 /// `third_party_conversation_owned_by_current_team_shows_continue_in_cloud_tombstone` already
 /// proves for the post-conversation-exists case. `creator` is only ever a natural person (see
 /// `RunCreatorInfoType`), so before `AmbientAgentTask::scope` existed, this predicate could
-/// only ever recognize the exact original creator — denying every other team member a CTA the
+/// only ever recognize the exact original creator — denying every other team member access the
 /// server would have genuinely authorized them for.
 #[test]
-fn retained_setup_failure_owned_by_current_team_shows_debug_cta_for_non_creator() {
+fn retained_setup_failure_owned_by_current_team_is_debug_routable_for_non_creator() {
     App::test((), |mut app| async move {
         let TestHandles {
             terminal_view_id,
@@ -847,23 +845,20 @@ fn retained_setup_failure_owned_by_current_team_shows_debug_cta_for_non_creator(
         });
 
         app.update(|ctx| {
-            let state =
-                resolve_cloud_conversation_continuation_ui_state(terminal_view_id, task_id, ctx);
+            let model = ambient_pane_model(task_id, SharedSessionStatus::NotShared);
             assert_eq!(
-                state,
-                Ok(CloudConversationContinuationUiState::Tombstone {
-                    cta: Some(TombstoneCta::DebugRetainedSetupFailure { task_id }),
-                }),
-                "a fellow team member must be offered the Debug CTA even though they are not the run's literal creator"
+                resolve_ai_query_routing(terminal_view_id, None, &model, ctx),
+                AIQueryRouting::RetainedSetupFailureDebug { task_id },
+                "a fellow team member must be able to debug the run even though they are not its literal creator"
             );
         });
     });
 }
 
 /// The team-membership recognition above must not grant access to a stranger: a team-owned
-/// run's CTA stays hidden for a viewer who does not belong to that team.
+/// run stays un-debuggable for a viewer who does not belong to that team.
 #[test]
-fn retained_setup_failure_owned_by_a_different_team_shows_no_cta() {
+fn retained_setup_failure_owned_by_a_different_team_is_not_debug_routable() {
     App::test((), |mut app| async move {
         let TestHandles {
             terminal_view_id,
@@ -894,12 +889,11 @@ fn retained_setup_failure_owned_by_a_different_team_shows_no_cta() {
         });
 
         app.update(|ctx| {
-            let state =
-                resolve_cloud_conversation_continuation_ui_state(terminal_view_id, task_id, ctx);
-            assert_eq!(
-                state,
-                Ok(CloudConversationContinuationUiState::Tombstone { cta: None }),
-                "a viewer on an unrelated team must not be offered the Debug CTA"
+            let model = ambient_pane_model(task_id, SharedSessionStatus::NotShared);
+            assert_ne!(
+                resolve_ai_query_routing(terminal_view_id, None, &model, ctx),
+                AIQueryRouting::RetainedSetupFailureDebug { task_id },
+                "a viewer on an unrelated team must not be able to debug the run"
             );
         });
     });

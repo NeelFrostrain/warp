@@ -19,6 +19,7 @@ use warp_cli::{
 };
 use warp_core::channel::ChannelState;
 use warp_core::features::FeatureFlag;
+use warp_graphql::ai::AgentTaskState;
 use warp_graphql::mutations::create_managed_mcp_client_config::{
     CreateManagedMcpClientConfigOutput, ManagedMcpTransportKind,
 };
@@ -31,11 +32,11 @@ use super::{
     AgentDriver, AgentDriverError, CLIAgentSessionStatus, DebugWindowController, IdleTimeoutSender,
     LEGACY_OZ_PARENT_LISTENER_MANAGED_EXTERNALLY_ENV, LEGACY_OZ_PARENT_STATE_ROOT_ENV,
     OZ_MESSAGE_LISTENER_MANAGED_EXTERNALLY_ENV, OZ_MESSAGE_LISTENER_STATE_ROOT_ENV,
-    PlatformErrorCode, SDKConversationOutputStatus, build_secret_env_vars,
+    PlatformErrorCode, SDKConversationOutputStatus, build_secret_env_vars, debug_turn_task_state,
     idle_window_for_cli_session_status, idle_window_for_terminal_status,
     setup_failure_status_update, terminal_status_log_outcome,
 };
-use crate::ai::agent::conversation::AIConversationId;
+use crate::ai::agent::conversation::{AIConversationId, ConversationStatus};
 use crate::ai::agent::task::TaskId;
 use crate::ai::agent::{
     AIAgentActionResult, AIAgentActionResultType, AIAgentInput, AIAgentOutput,
@@ -812,6 +813,46 @@ fn debug_window_controller_duplicate_pin_is_idempotent() {
     );
 }
 
+#[test]
+fn debug_window_controller_overlapping_turns_stay_pinned_until_the_last_turn_finishes() {
+    let (tx, _rx) = oneshot::channel::<()>();
+    let controller = DebugWindowController::new(IdleTimeoutSender::new(tx));
+    let first_turn = AIConversationId::new();
+    let second_turn = AIConversationId::new();
+
+    assert!(controller.pin_for_turn(first_turn));
+    assert!(controller.pin_for_turn(second_turn));
+    assert!(controller.finish_turn(first_turn, (), Duration::from_secs(60)));
+    assert!(controller.is_pinned());
+    assert!(controller.finish_turn(second_turn, (), Duration::from_secs(60)));
+    assert!(!controller.is_pinned());
+}
+
+#[test]
+fn debug_turn_task_state_maps_timeline_states() {
+    let blocked = ConversationStatus::Blocked {
+        blocked_action: "approval".to_string(),
+    };
+    let cases = [
+        (
+            ConversationStatus::InProgress,
+            Some(AgentTaskState::InProgress),
+        ),
+        (ConversationStatus::Success, Some(AgentTaskState::Succeeded)),
+        (ConversationStatus::Error, Some(AgentTaskState::Error)),
+        (
+            ConversationStatus::Cancelled,
+            Some(AgentTaskState::Cancelled),
+        ),
+        (blocked, Some(AgentTaskState::Blocked)),
+        (ConversationStatus::TransientError, None),
+        (ConversationStatus::WaitingForEvents, None),
+    ];
+
+    for (status, expected) in cases {
+        assert_eq!(debug_turn_task_state(&status), expected);
+    }
+}
 #[test]
 fn debug_window_controller_duplicate_finish_is_idempotent() {
     let (tx, mut rx) = oneshot::channel::<()>();

@@ -33,6 +33,8 @@ pub struct UpdateAgentTaskInput {
     /// text in `status_message`.
     #[cynic(skip_serializing_if = "Option::is_none")]
     pub debug_agent_active: Option<bool>,
+    #[cynic(skip_serializing_if = "Option::is_none")]
+    pub debug_turn_id: Option<cynic::Id>,
 }
 
 #[derive(cynic::InputObject, Debug)]

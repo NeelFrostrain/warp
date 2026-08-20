@@ -21,17 +21,8 @@ use crate::workspaces::user_workspaces::UserWorkspaces;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum TombstoneCta {
-    ContinueLocally {
-        conversation_id: AIConversationId,
-    },
-    ContinueInCloud {
-        task_id: AmbientAgentTaskId,
-    },
-    /// Enables the tombstone's agent input for an authorized caller to debug a retained
-    /// environment-setup failure (REMOTE-2661), instead of a plain CTA button.
-    DebugRetainedSetupFailure {
-        task_id: AmbientAgentTaskId,
-    },
+    ContinueLocally { conversation_id: AIConversationId },
+    ContinueInCloud { task_id: AmbientAgentTaskId },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -140,9 +131,7 @@ pub(in crate::terminal::view) fn resolve_cloud_conversation_continuation_ui_stat
             .as_ref()
             .is_some_and(|status_message| status_message.is_environment_setup_failure());
     if is_environment_setup_failure && task.conversation_id().is_none() {
-        let cta = is_retained_setup_failure_debug_editable(&task, app)
-            .then_some(TombstoneCta::DebugRetainedSetupFailure { task_id });
-        return Ok(CloudConversationContinuationUiState::Tombstone { cta });
+        return Ok(CloudConversationContinuationUiState::Tombstone { cta: None });
     }
     let conversation_token = task
         .conversation_id()
@@ -182,6 +171,21 @@ pub(in crate::terminal::view) fn resolve_cloud_conversation_continuation_ui_stat
     }
 }
 
+/// Resolves the ambient agent task id for a pane: the attached ambient view model's task id
+/// takes priority, falling back to the terminal model's own (e.g. a shared-session viewer or a
+/// restored ambient conversation-transcript pane). Shared by [`resolve_ai_query_routing`],
+/// `TerminalView`'s conversation-details-panel gate, and `Input`'s no-token-prompt guards, so
+/// the three surfaces cannot drift on how they resolve the same task id.
+pub(crate) fn resolve_ambient_agent_task_id(
+    ambient_agent_view_model: Option<&ModelHandle<AmbientAgentViewModel>>,
+    terminal_model: &TerminalModel,
+    app: &AppContext,
+) -> Option<AmbientAgentTaskId> {
+    ambient_agent_view_model
+        .and_then(|model| model.as_ref(app).task_id())
+        .or_else(|| terminal_model.ambient_agent_task_id())
+}
+
 /// Resolves the [`AIQueryRouting`] for a pane from its terminal model and optional ambient
 /// view model. `terminal_model` must already be locked by the caller; this function does not lock
 /// it, and reuses [`resolve_cloud_conversation_continuation_ui_state`] for the disconnected case.
@@ -197,9 +201,8 @@ pub(crate) fn resolve_ai_query_routing(
     let is_transcript_viewer = terminal_model.is_conversation_transcript_viewer();
     // The ambient task this pane is associated with, if any. `None` for a shared *local* session,
     // which keeps the footer's live-VM indicator hidden for non-ambient shared sessions.
-    let ambient_agent_task_id = ambient_agent_view_model
-        .and_then(|model| model.as_ref(app).task_id())
-        .or_else(|| terminal_model.ambient_agent_task_id());
+    let ambient_agent_task_id =
+        resolve_ambient_agent_task_id(ambient_agent_view_model, terminal_model, app);
 
     // A retained setup-failure debug session takes priority over ordinary live-viewer routing:
     // an already-attached viewer must still submit through the authenticated follow-up service
