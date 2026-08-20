@@ -23,7 +23,7 @@ use super::AgentDriverError;
 use super::cache_setup;
 use super::terminal::TerminalDriver;
 use crate::ai::agent_sdk::setup_observability::{SetupClientEventReporter, SetupStep};
-use crate::ai::cloud_environments::SourceRepo;
+use crate::ai::cloud_environments::{AmbientAgentEnvironment, SourceRepo};
 use crate::terminal::model::session::command_executor::shell_escape_single_quotes;
 use crate::terminal::shell::ShellType;
 
@@ -220,6 +220,98 @@ pub(crate) fn merge_repos_deduped(
     }
 
     Ok(merged)
+}
+
+/// Resolves the eager repository list for this run.
+///
+/// `source_repos_to_clone` is the authoritative run-scoped materialization plan computed by
+/// the server for a Factory-owned run: when present, including when empty, it is used exactly
+/// as-is and is never combined with the environment's repositories or
+/// `additional_source_repos`. `None` means this is a legacy task, so the environment's
+/// repositories and `additional_source_repos` are merged as before.
+///
+/// Either branch is passed through [`merge_repos_deduped`] so the existing identity
+/// normalization and exact-target-name [`PrepareEnvironmentError::CloneDirectoryCollision`]
+/// check keep applying.
+pub(crate) fn resolve_eager_source_repos(
+    environment: Option<&AmbientAgentEnvironment>,
+    source_repos_to_clone: Option<Vec<SourceRepo>>,
+    additional_source_repos: Vec<SourceRepo>,
+) -> Result<Vec<SourceRepo>, PrepareEnvironmentError> {
+    match source_repos_to_clone {
+        Some(source_repos_to_clone) => merge_repos_deduped(source_repos_to_clone, Vec::new()),
+        None => merge_repos_deduped(
+            environment
+                .map(AmbientAgentEnvironment::effective_repos)
+                .unwrap_or_default(),
+            additional_source_repos,
+        ),
+    }
+}
+
+/// Builds the hidden, transport-neutral on-demand-clone instruction for repositories that
+/// remain deferred after the eager repository list for this run is resolved. Returns `None`
+/// when nothing is deferred, so callers omit the instruction entirely.
+pub(crate) fn build_deferred_repos_instruction(
+    eager_repos: &[SourceRepo],
+    deferred_repos: &[SourceRepo],
+) -> Option<String> {
+    if deferred_repos.is_empty() {
+        return None;
+    }
+
+    let mut sorted_deferred = deferred_repos.to_vec();
+    sorted_deferred.sort_by(|a, b| {
+        a.code_forge
+            .unwrap_or_default()
+            .to_string()
+            .cmp(&b.code_forge.unwrap_or_default().to_string())
+            .then_with(|| a.owner.to_lowercase().cmp(&b.owner.to_lowercase()))
+            .then_with(|| a.repo.to_lowercase().cmp(&b.repo.to_lowercase()))
+    });
+
+    // The client clones every eager repository to `{working_dir}/{repo}` and rejects two
+    // eager repositories that share an exact target name before cloning (see
+    // `merge_repos_deduped`). A deferred repository whose default target collides with that
+    // eager set, or with another deferred repository, must not be offered the shared path.
+    let mut target_name_counts: HashMap<&str, usize> = HashMap::new();
+    for repo in eager_repos.iter().chain(sorted_deferred.iter()) {
+        *target_name_counts.entry(repo.repo.as_str()).or_default() += 1;
+    }
+
+    let entries = sorted_deferred.iter().map(|repo| {
+        let forge = repo.code_forge.unwrap_or_default();
+        let clone_url = repo.https_clone_url();
+        let identity = format!("{forge} {}/{}", repo.owner, repo.repo);
+        if target_name_counts.get(repo.repo.as_str()).copied().unwrap_or(0) > 1 {
+            format!(
+                "- {identity}\n  Clone URL: {clone_url}\n  Target conflict: another attached repository already uses '{}' as its target. \
+                 Choose an explicit, unused target directory before cloning:\n  \
+                 test ! -e '<unused-target>' && git clone --filter=tree:0 {clone_url} '<unused-target>'",
+                repo.repo
+            )
+        } else {
+            format!(
+                "- {identity}\n  Clone URL: {clone_url}\n  Preferred target: {}\n  \
+                 test ! -e '{}' && git clone --filter=tree:0 {clone_url} '{}'",
+                repo.repo, repo.repo, repo.repo
+            )
+        }
+    });
+
+    Some(format!(
+        "Repositories attached to this Factory but not currently cloned:\n{}\n\n\
+         Clone a repository only when the task needs it, using its guarded command above. \
+         Each command checks that the target does not already exist before cloning, so it \
+         never overwrites an existing checkout.\n\
+         Use HTTPS and the preconfigured credential helper; credentials refresh automatically \
+         for the run lifetime. Never put an access token in a prompt, command, URL, log, or \
+         file you create.\n\
+         An on-demand clone creates a Git working tree only. It does not automatically load \
+         repository skills, discover file-based MCP servers, run setup commands, initialize \
+         build cache, or register the repository with Oz codebase indexing.",
+        entries.collect::<Vec<_>>().join("\n\n")
+    ))
 }
 
 /// Environment variable carrying the authenticated remote URL of a Factory's
