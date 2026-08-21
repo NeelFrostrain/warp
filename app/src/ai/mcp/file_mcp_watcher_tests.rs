@@ -624,6 +624,66 @@ fn registration_failure_settles_stranded_subdir_provider_directly() {
     });
 }
 
+/// The stranded-subdir fallback must not re-read a source that has already settled by the
+/// time it runs (e.g. the watcher's queued scan delivered and completed before an async
+/// registration failure was even reported): re-reading would be a second filesystem read and a
+/// second `ConfigParsed` reconciliation for no benefit, violating the one-read-per-initial-
+/// source invariant.
+#[test]
+fn settle_stranded_subdir_configs_skips_an_already_settled_source() {
+    let dir = tempfile::tempdir().expect("temp dir should be created");
+    let home_dir = dir.path().to_path_buf();
+    let codex_dir = home_dir.join(".codex");
+    std::fs::create_dir_all(&codex_dir).expect("codex subdir should be created");
+    let codex_config_path = codex_dir.join("config.toml");
+    std::fs::write(
+        &codex_config_path,
+        "[mcp_servers.test-codex-server]\ncommand = \"npx\"\nargs = [\"-y\", \"test-server\"]\n",
+    )
+    .expect("codex config should be written");
+
+    let pending = HashSet::from([(codex_config_path.clone(), MCPProvider::Codex)]);
+
+    App::test((), |mut app| async move {
+        let watcher = setup_watcher_with_pending(&mut app, pending);
+        let rx = watch_initial_global_scan_completions(&mut app, &watcher, 1);
+
+        // Simulate the watcher's queued scan delivering and settling the source first -- the
+        // non-stranded case: an ordinary parse for this source completes and drains the
+        // cohort, exactly as the real `on_scan`-triggered path would.
+        watcher.update(&mut app, |watcher, ctx| {
+            watcher.update_servers_from_config_file(
+                &codex_config_path,
+                home_dir.clone(),
+                MCPProvider::Codex,
+                ctx,
+            );
+        });
+        rx.await
+            .expect("the delivered parse should settle the initial scan");
+
+        // A second `ConfigParsed` for this source after settlement would mean the fallback
+        // re-read it.
+        let second_parse_rx =
+            watch_config_parsed_scan_origin(&mut app, &watcher, MCPProvider::Codex);
+
+        // The registration-failure fallback runs anyway (e.g. the async failure was reported
+        // after the scan already settled the source); it must be a no-op now.
+        watcher.update(&mut app, |watcher, ctx| {
+            watcher.settle_stranded_subdir_configs(&codex_dir, home_dir.clone(), ctx);
+        });
+
+        use warpui::r#async::FutureExt as _;
+        assert!(
+            second_parse_rx
+                .with_timeout(std::time::Duration::from_millis(200))
+                .await
+                .is_err(),
+            "the fallback must not re-read an already-settled source"
+        );
+    });
+}
+
 /// An existing home-subdir provider (e.g. `~/.codex`) must still be awaited by the initial
 /// global scan even though its read is delivered by the directory watcher's queued `on_scan`
 /// rather than a direct parse scheduled in `FileMCPWatcher::new`. Regression test for a bug

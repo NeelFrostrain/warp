@@ -471,12 +471,22 @@ impl FileMCPWatcher {
     }
 
     /// Directly parses every provider config under `subdir_path` (e.g. `~/.codex/config.toml`
-    /// under `~/.codex`), because the directory watcher's queued initial scan for it will
-    /// never arrive: [`Self::watch_home_provider_dir`]'s registration-failure handler calls
-    /// this after `stop_watching` has already removed the subscription the queued scan needed
-    /// to find. Without this, any of those sources still pending in
-    /// `initial_global_scan_pending` would block until the caller's timeout instead of
-    /// settling.
+    /// under `~/.codex`) that is genuinely stranded, because the directory watcher's queued
+    /// initial scan for it will never arrive: [`Self::watch_home_provider_dir`]'s
+    /// registration-failure handler calls this after `stop_watching` has already removed the
+    /// subscription the queued scan needed to find. Without this, any of those sources still
+    /// pending in `initial_global_scan_pending` would block until the caller's timeout instead
+    /// of settling.
+    ///
+    /// Only sources still owed by the cohort, with no in-flight parse already covering them,
+    /// are re-read: the queued scan may have already delivered (and settled) a source before
+    /// this handler ran, or another caller may have already scheduled a read for it. Re-reading
+    /// either case would be a second filesystem read and a second `ConfigParsed`/`ConfigRemoved`
+    /// reconciliation (tagged `Other`, since the cohort no longer -- or doesn't yet, for an
+    /// in-flight case -- own it) for no benefit, violating the one-read-per-initial-source
+    /// invariant. Cohort membership is a sound gate for this: `update_servers_from_config_file`
+    /// only ever tests it, its completion callbacks only ever remove it, and nothing re-adds a
+    /// key once scheduling here is done.
     fn settle_stranded_subdir_configs(
         &mut self,
         subdir_path: &Path,
@@ -486,7 +496,12 @@ impl FileMCPWatcher {
         for (provider, config_path) in
             providers_in_scope(home_dir.clone(), subdir_path.to_path_buf())
         {
-            self.update_servers_from_config_file(&config_path, home_dir.clone(), provider, ctx);
+            let key = (config_path.clone(), provider);
+            if self.initial_global_scan_pending.contains(&key)
+                && !self.in_flight_parses.contains_key(&key)
+            {
+                self.update_servers_from_config_file(&config_path, home_dir.clone(), provider, ctx);
+            }
         }
     }
 
