@@ -2037,8 +2037,34 @@ impl AgentDriver {
         rx
     }
 
+    /// Whether `uuid` still needs to be awaited by [`Self::wait_for_file_based_mcps_running`]:
+    /// it must still be tracked by [`FileBasedMCPManager`] (i.e. its config has not been
+    /// removed) and not yet have reached a terminal state (`Running`, `FailedToStart`, or
+    /// `NotRunning`). A config removed before or during the wait despawns its installation and
+    /// reports `NotRunning`, which settles the wait rather than blocking it: later file changes
+    /// must stay dynamic and never delay the first request.
+    fn is_file_based_mcp_pending(
+        templatable_manager: &TemplatableMCPServerManager,
+        file_based_manager: &FileBasedMCPManager,
+        uuid: Uuid,
+    ) -> bool {
+        file_based_manager.get_hash_by_uuid(uuid).is_some()
+            && !matches!(
+                templatable_manager.get_server_state(uuid),
+                Some(MCPServerState::Running)
+                    | Some(MCPServerState::FailedToStart)
+                    | Some(MCPServerState::NotRunning)
+            )
+    }
+
     /// Wait for auto-start-requested file-based MCP servers to reach a terminal state
-    /// (`Running` or `FailedToStart`). Non-fatal: always completes without returning an error.
+    /// (`Running`, `FailedToStart`, or a despawn's `NotRunning`), bounded by `timeout`.
+    /// Non-fatal: always completes without returning an error.
+    ///
+    /// `timeout` is the caller's remaining budget rather than a fresh one: a caller that
+    /// already spent part of a shared deadline on a preceding phase (e.g. awaiting scan
+    /// completion) must pass only what is left of it, so the combined phases stay within one
+    /// bounded window instead of compounding into multiple full timeouts.
     ///
     /// **Sequencing note:** `AgentDriver` supports only one active subscription to
     /// [`TemplatableMCPServerManager`] at a time. This function, [`Self::start_mcp_servers`],
@@ -2047,18 +2073,18 @@ impl AgentDriver {
     fn wait_for_file_based_mcps_running(
         &self,
         uuids: Vec<Uuid>,
+        timeout: Duration,
         ctx: &mut ModelContext<Self>,
     ) -> impl Future<Output = ()> + use<> {
-        // Filter out UUIDs that have already reached a terminal state.
+        // Filter out UUIDs that have already reached a terminal state, or whose installation
+        // is no longer tracked at all (e.g. despawned before this wait ever subscribed).
         let mut pending_uuids: HashSet<Uuid> = {
             let templatable_manager = TemplatableMCPServerManager::as_ref(ctx);
+            let file_based_manager = FileBasedMCPManager::as_ref(ctx);
             uuids
                 .into_iter()
                 .filter(|uuid| {
-                    !matches!(
-                        templatable_manager.get_server_state(*uuid),
-                        Some(MCPServerState::Running) | Some(MCPServerState::FailedToStart)
-                    )
+                    Self::is_file_based_mcp_pending(templatable_manager, file_based_manager, *uuid)
                 })
                 .collect()
         };
@@ -2135,7 +2161,9 @@ impl AgentDriver {
                         details.insert(*uuid, format!("{server_name} ({uuid}): {state:?}{error}"));
                     }
                     match state {
-                        MCPServerState::Running | MCPServerState::FailedToStart => {
+                        MCPServerState::Running
+                        | MCPServerState::FailedToStart
+                        | MCPServerState::NotRunning => {
                             pending_uuids.remove(uuid);
                             if let Ok(mut details) = pending_state_details_for_subscription.lock() {
                                 details.remove(uuid);
@@ -2159,7 +2187,7 @@ impl AgentDriver {
         );
 
         Either::Left(async move {
-            match rx.with_timeout(MCP_SERVER_STARTUP_TIMEOUT).await {
+            match rx.with_timeout(timeout).await {
                 Ok(Ok(())) => {}
                 Ok(Err(Canceled)) => {
                     log::warn!(
@@ -2187,11 +2215,16 @@ impl AgentDriver {
     /// `FileBasedMCPManager` schedule — and often finish — this scan during application model
     /// initialization, well before any particular run's `AgentDriver` exists, so the scan has
     /// frequently already completed by the time this runs. Falls back to subscribing for the
-    /// transient completion event, bounded by the MCP startup timeout, only when the scan is
-    /// still pending. Non-fatal: always resolves, with an empty snapshot on timeout or
-    /// cancellation.
+    /// transient completion event, bounded by `deadline`, only when the scan is still pending.
+    /// Non-fatal: always resolves, with an empty snapshot on timeout or cancellation.
+    ///
+    /// `deadline` is shared with the caller's subsequent readiness wait (see
+    /// [`Self::wait_for_file_based_mcps_running`]) so scan completion and server readiness stay
+    /// one bounded phase under the MCP startup timeout, rather than each getting its own full
+    /// timeout.
     fn wait_for_initial_global_file_based_mcp_scan(
         &self,
+        deadline: SystemTime,
         ctx: &mut ModelContext<Self>,
     ) -> impl Future<Output = Vec<Uuid>> + use<> {
         let manager = FileBasedMCPManager::handle(ctx);
@@ -2212,8 +2245,11 @@ impl AgentDriver {
             }
         });
 
+        let remaining = deadline
+            .duration_since(SystemTime::now())
+            .unwrap_or(Duration::ZERO);
         Either::Left(async move {
-            match rx.with_timeout(MCP_SERVER_STARTUP_TIMEOUT).await {
+            match rx.with_timeout(remaining).await {
                 Ok(Ok(uuids)) => uuids,
                 Ok(Err(Canceled)) => {
                     log::warn!(
@@ -2884,7 +2920,11 @@ impl AgentDriver {
                         .record_result(SetupStep::FileBasedMcpReadiness, async {
                             foreground
                                 .spawn(move |me, ctx| {
-                                    me.wait_for_file_based_mcps_running(wait_uuids, ctx)
+                                    me.wait_for_file_based_mcps_running(
+                                        wait_uuids,
+                                        MCP_SERVER_STARTUP_TIMEOUT,
+                                        ctx,
+                                    )
                                 })
                                 .await?
                                 .await;
@@ -2977,8 +3017,19 @@ impl AgentDriver {
                 // adding a new serialization point ahead of any of that other setup.
                 // Bounded and non-fatal: see `wait_for_initial_global_file_based_mcp_scan`
                 // and `wait_for_file_based_mcps_running`.
+                //
+                // `initial_global_mcp_deadline` is shared across both waits so scan
+                // completion and server readiness are one bounded phase under
+                // `MCP_SERVER_STARTUP_TIMEOUT`, rather than each getting its own full
+                // timeout.
+                let initial_global_mcp_deadline = SystemTime::now() + MCP_SERVER_STARTUP_TIMEOUT;
                 let initial_global_scan_wait = foreground
-                    .spawn(|me, ctx| me.wait_for_initial_global_file_based_mcp_scan(ctx))
+                    .spawn(move |me, ctx| {
+                        me.wait_for_initial_global_file_based_mcp_scan(
+                            initial_global_mcp_deadline,
+                            ctx,
+                        )
+                    })
                     .await?;
                 let initial_global_wait_uuids = setup_events
                     .record_value(SetupStep::InitialGlobalMcpScan, initial_global_scan_wait)
@@ -2990,10 +3041,14 @@ impl AgentDriver {
                     );
                     setup_events
                         .record_result(SetupStep::InitialGlobalMcpReadiness, async {
+                            let remaining_readiness_timeout = initial_global_mcp_deadline
+                                .duration_since(SystemTime::now())
+                                .unwrap_or(Duration::ZERO);
                             foreground
                                 .spawn(move |me, ctx| {
                                     me.wait_for_file_based_mcps_running(
                                         initial_global_wait_uuids,
+                                        remaining_readiness_timeout,
                                         ctx,
                                     )
                                 })

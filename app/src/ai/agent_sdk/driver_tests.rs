@@ -1,13 +1,14 @@
 use std::collections::{HashMap, HashSet};
 use std::ffi::OsString;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use cloud_object_models::CodeForge;
 use futures::channel::oneshot;
 use futures::executor::block_on;
+use instant::Instant;
 use repo_metadata::{DirectoryWatcher, RepoMetadataEvent, RepoMetadataModel, RepositoryIdentifier};
 use tempfile::TempDir;
 use warp_cli::agent::Harness;
@@ -1874,6 +1875,56 @@ fn simulate_completed_initial_global_scan_with_one_server(
     }))
 }
 
+/// Like [`simulate_completed_initial_global_scan_with_one_server`], but leaves the
+/// initial-global scan itself pending so the caller controls when it completes. Returns the
+/// installation UUID.
+fn simulate_pending_initial_global_scan_with_one_server(
+    app: &mut App,
+    file_based_manager: &warpui::ModelHandle<FileBasedMCPManager>,
+) -> Option<uuid::Uuid> {
+    let warp_mcp_config_path = warp_managed_mcp_config_path()?;
+    let parsed = ParsedTemplatableMCPServerResult::from_user_json(
+        r#"{"global-warp": {"command": "npx", "args": ["warp"]}}"#,
+    )
+    .unwrap_or_default();
+
+    Some(file_based_manager.update(app, |manager, ctx| {
+        manager.handle_watcher_event(
+            &FileMCPWatcherEvent::ConfigParsed {
+                config_path: warp_mcp_config_path.config_path.clone(),
+                root_path: warp_mcp_config_path.root_path.clone(),
+                provider: MCPProvider::Warp,
+                servers: parsed,
+                scan_origin: FileMCPScanOrigin::InitialGlobal,
+            },
+            ctx,
+        );
+        manager
+            .global_warp_servers()
+            .into_iter()
+            .map(|s| s.uuid())
+            .next()
+            .expect("the global Warp server should have been auto-started")
+    }))
+}
+
+/// Like [`simulate_completed_initial_global_scan_with_one_server`], but also returns the
+/// config and root paths used, so the caller can simulate that config's removal later.
+fn simulate_completed_initial_global_scan_with_one_server_and_paths(
+    app: &mut App,
+    file_based_manager: &warpui::ModelHandle<FileBasedMCPManager>,
+) -> Option<(uuid::Uuid, PathBuf, PathBuf)> {
+    let warp_mcp_config_path = warp_managed_mcp_config_path()?;
+    let installation_uuid =
+        simulate_completed_initial_global_scan_with_one_server(app, file_based_manager)?;
+
+    Some((
+        installation_uuid,
+        warp_mcp_config_path.config_path,
+        warp_mcp_config_path.root_path,
+    ))
+}
+
 /// `wait_for_initial_global_file_based_mcp_scan` must return the cached wait-set snapshot
 /// immediately (no event subscription needed) when the scan already completed before the
 /// driver was constructed — the scenario that matters for `AgentDriver`, since application
@@ -1900,7 +1951,10 @@ fn initial_global_scan_wait_returns_cached_snapshot_immediately() {
         });
 
         let wait_future = driver_handle.update(&mut app, |driver, ctx| {
-            driver.wait_for_initial_global_file_based_mcp_scan(ctx)
+            driver.wait_for_initial_global_file_based_mcp_scan(
+                SystemTime::now() + Duration::from_secs(20),
+                ctx,
+            )
         });
         let wait_uuids = wait_future.await;
         assert_eq!(
@@ -1936,7 +1990,11 @@ fn initial_global_mcp_readiness_wait_unblocks_on_running() {
 
         let (ready_tx, mut ready_rx) = futures::channel::oneshot::channel::<()>();
         driver_handle.update(&mut app, |driver, ctx| {
-            let wait = driver.wait_for_file_based_mcps_running(vec![installation_uuid], ctx);
+            let wait = driver.wait_for_file_based_mcps_running(
+                vec![installation_uuid],
+                Duration::from_secs(5),
+                ctx,
+            );
             ctx.spawn(wait, move |_, (), _| {
                 let _ = ready_tx.send(());
             });
@@ -1989,7 +2047,11 @@ fn initial_global_mcp_readiness_wait_unblocks_on_failed_to_start() {
 
         let (ready_tx, ready_rx) = futures::channel::oneshot::channel::<()>();
         driver_handle.update(&mut app, |driver, ctx| {
-            let wait = driver.wait_for_file_based_mcps_running(vec![installation_uuid], ctx);
+            let wait = driver.wait_for_file_based_mcps_running(
+                vec![installation_uuid],
+                Duration::from_secs(5),
+                ctx,
+            );
             ctx.spawn(wait, move |_, (), _| {
                 let _ = ready_tx.send(());
             });
@@ -2009,5 +2071,196 @@ fn initial_global_mcp_readiness_wait_unblocks_on_failed_to_start() {
         ready_rx
             .await
             .expect("readiness wait should resolve (not hang) once the server FailedToStart");
+    });
+}
+
+/// Scan completion and readiness together must stay within one shared timeout budget: a scan
+/// that completes near the deadline must leave the following readiness wait only the small
+/// remainder, not a fresh full timeout. Regression test for a doubled-budget bug where each
+/// phase got its own full `MCP_SERVER_STARTUP_TIMEOUT`.
+#[test]
+#[serial_test::serial]
+fn initial_global_scan_and_readiness_share_one_bounded_timeout_budget() {
+    let _flag_guard = FeatureFlag::FileBasedMcp.override_enabled(true);
+
+    App::test((), |mut app| async move {
+        initialize_app_for_terminal_view(&mut app);
+        let file_based_manager = setup_file_based_mcp_singletons(&mut app);
+        let Some(installation_uuid) =
+            simulate_pending_initial_global_scan_with_one_server(&mut app, &file_based_manager)
+        else {
+            return;
+        };
+
+        let terminal_view = add_window_with_terminal(&mut app, None);
+        let driver_handle = app.add_model(|ctx| {
+            let terminal_driver =
+                super::terminal::TerminalDriver::create_from_existing_view(terminal_view, ctx);
+            AgentDriver::new_for_test(std::env::temp_dir(), terminal_driver, ctx)
+        });
+
+        // A short stand-in for `MCP_SERVER_STARTUP_TIMEOUT` so the test runs fast. The scan
+        // completes deliberately close to this deadline, leaving only a small remainder for
+        // the following readiness wait.
+        let budget = Duration::from_millis(400);
+        let deadline = SystemTime::now() + budget;
+
+        let scan_wait = driver_handle.update(&mut app, |driver, ctx| {
+            driver.wait_for_initial_global_file_based_mcp_scan(deadline, ctx)
+        });
+
+        let start = Instant::now();
+        let (wait_uuids, _) = futures::join!(scan_wait, async {
+            // Fire scan completion close to (but before) the deadline.
+            warpui::r#async::Timer::after(budget - Duration::from_millis(80)).await;
+            file_based_manager.update(&mut app, |manager, ctx| {
+                manager
+                    .handle_watcher_event(&FileMCPWatcherEvent::InitialGlobalMcpScanComplete, ctx);
+            });
+        });
+        assert_eq!(wait_uuids, vec![installation_uuid]);
+
+        // The fix: pass only the remaining slice of the shared deadline into the readiness
+        // wait instead of a fresh full timeout.
+        let remaining = deadline
+            .duration_since(SystemTime::now())
+            .unwrap_or(Duration::ZERO);
+        let readiness_wait = driver_handle.update(&mut app, |driver, ctx| {
+            driver.wait_for_file_based_mcps_running(wait_uuids, remaining, ctx)
+        });
+        readiness_wait.await;
+
+        let elapsed = start.elapsed();
+        assert!(
+            elapsed < budget + Duration::from_millis(200),
+            "scan completion plus readiness must stay within one shared budget ({budget:?}), \
+             not compound into a second full timeout; took {elapsed:?}"
+        );
+    });
+}
+
+/// A global config removed *before* the readiness wait ever subscribes must be treated as
+/// already settled: an absent/despawned installation is no longer awaited at all, so the wait
+/// resolves immediately instead of subscribing and burning its configured timeout. Regression
+/// test: the initial pending-check previously only consulted `TemplatableMCPServerManager`
+/// state, which never records that an installation was despawned entirely.
+#[test]
+#[serial_test::serial]
+fn initial_global_mcp_readiness_wait_settles_immediately_when_config_removed_before_subscribing() {
+    let _flag_guard = FeatureFlag::FileBasedMcp.override_enabled(true);
+
+    App::test((), |mut app| async move {
+        initialize_app_for_terminal_view(&mut app);
+        let file_based_manager = setup_file_based_mcp_singletons(&mut app);
+        let Some((installation_uuid, config_path, root_path)) =
+            simulate_completed_initial_global_scan_with_one_server_and_paths(
+                &mut app,
+                &file_based_manager,
+            )
+        else {
+            return;
+        };
+
+        // Remove the global config before the readiness wait is ever created, as if the file
+        // was deleted between the scan completing and this join running.
+        file_based_manager.update(&mut app, |manager, ctx| {
+            manager.handle_watcher_event(
+                &FileMCPWatcherEvent::ConfigRemoved {
+                    config_path,
+                    root_path,
+                    provider: MCPProvider::Warp,
+                },
+                ctx,
+            );
+        });
+
+        let terminal_view = add_window_with_terminal(&mut app, None);
+        let driver_handle = app.add_model(|ctx| {
+            let terminal_driver =
+                super::terminal::TerminalDriver::create_from_existing_view(terminal_view, ctx);
+            AgentDriver::new_for_test(std::env::temp_dir(), terminal_driver, ctx)
+        });
+
+        // A generous configured timeout the readiness wait should NOT need at all.
+        let configured_timeout = Duration::from_secs(5);
+        use futures::FutureExt as _;
+        let resolved_immediately = driver_handle
+            .update(&mut app, |driver, ctx| {
+                driver.wait_for_file_based_mcps_running(
+                    vec![installation_uuid],
+                    configured_timeout,
+                    ctx,
+                )
+            })
+            .now_or_never();
+
+        assert!(
+            resolved_immediately.is_some(),
+            "a despawned installation must be settled up front, not subscribed and awaited"
+        );
+    });
+}
+
+/// A global config removed *after* the readiness wait has already subscribed must settle it via
+/// the despawn's `NotRunning` transition, rather than exhausting the full configured timeout.
+/// Regression test: the readiness wait previously only treated `Running` and `FailedToStart` as
+/// terminal, so a deleted config's `NotRunning` was ignored and the wait hung for the whole
+/// budget.
+#[test]
+#[serial_test::serial]
+fn initial_global_mcp_readiness_wait_settles_on_notrunning_after_subscribing() {
+    let _flag_guard = FeatureFlag::FileBasedMcp.override_enabled(true);
+
+    App::test((), |mut app| async move {
+        initialize_app_for_terminal_view(&mut app);
+        let file_based_manager = setup_file_based_mcp_singletons(&mut app);
+        let Some(installation_uuid) =
+            simulate_completed_initial_global_scan_with_one_server(&mut app, &file_based_manager)
+        else {
+            return;
+        };
+
+        let terminal_view = add_window_with_terminal(&mut app, None);
+        let driver_handle = app.add_model(|ctx| {
+            let terminal_driver =
+                super::terminal::TerminalDriver::create_from_existing_view(terminal_view, ctx);
+            AgentDriver::new_for_test(std::env::temp_dir(), terminal_driver, ctx)
+        });
+
+        // A generous configured timeout the readiness wait should NOT need: the NotRunning
+        // transition below must settle it almost immediately instead.
+        let configured_timeout = Duration::from_secs(5);
+        let (ready_tx, ready_rx) = futures::channel::oneshot::channel::<()>();
+        driver_handle.update(&mut app, |driver, ctx| {
+            let wait = driver.wait_for_file_based_mcps_running(
+                vec![installation_uuid],
+                configured_timeout,
+                ctx,
+            );
+            ctx.spawn(wait, move |_, (), _| {
+                let _ = ready_tx.send(());
+            });
+        });
+
+        // Simulate the despawn's synchronous shutdown outcome for an installation that never
+        // reached `Running` (the same transition `TemplatableMCPServerManager::shutdown_server`
+        // produces when a config is removed).
+        crate::ai::mcp::TemplatableMCPServerManager::handle(&app).update(
+            &mut app,
+            |manager, ctx| {
+                manager.change_server_state(
+                    installation_uuid,
+                    crate::ai::mcp::MCPServerState::NotRunning,
+                    ctx,
+                );
+            },
+        );
+
+        use warpui::r#async::FutureExt as _;
+        ready_rx
+            .with_timeout(Duration::from_millis(500))
+            .await
+            .expect("the NotRunning transition should settle the wait promptly")
+            .expect("readiness wait task should not have been dropped");
     });
 }
