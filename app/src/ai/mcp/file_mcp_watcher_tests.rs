@@ -9,11 +9,12 @@ use settings::SettingsMode;
 use warpui::App;
 
 use super::{
-    FileMCPConfigDiagnosticKind, FileMCPConfigParseOutcome, FileMCPWatcher, FileMCPWatcherEvent,
-    InFlightParse, config_change_flags, home_subdir_to_watch, parse_mcp_config_file,
-    providers_in_scope, should_watch_repository, substitute_env_vars,
+    FileMCPConfigDiagnosticKind, FileMCPConfigParseOutcome, FileMCPScanOrigin, FileMCPWatcher,
+    FileMCPWatcherEvent, InFlightParse, config_change_flags, home_subdir_to_watch,
+    parse_mcp_config_file, providers_in_scope, should_watch_repository, substitute_env_vars,
 };
 use crate::ai::mcp::MCPProvider;
+use crate::test_util::terminal::initialize_app_for_terminal_view;
 
 /// Constructs a `FileMCPWatcher` singleton with an explicit initial-global-scan pending set,
 /// bypassing the real home-directory scan in `FileMCPWatcher::new` so tests are deterministic
@@ -546,6 +547,141 @@ fn stale_completion_callback_cannot_reclaim_a_superseded_source() {
         rx.await
             .expect("the replacement's own completion should settle the initial scan");
     });
+}
+
+/// Subscribes to `FileMCPWatcher` and returns a future that resolves with the `scan_origin` of
+/// the first `ConfigParsed` event observed for `provider`.
+fn watch_config_parsed_scan_origin(
+    app: &mut App,
+    watcher: &warpui::ModelHandle<FileMCPWatcher>,
+    provider: MCPProvider,
+) -> futures::channel::oneshot::Receiver<FileMCPScanOrigin> {
+    let (tx, rx) = futures::channel::oneshot::channel::<FileMCPScanOrigin>();
+    let mut tx = Some(tx);
+    let collector = app.add_model(|_| WatcherEventCollector);
+    collector.update(app, |_, ctx| {
+        ctx.subscribe_to_model(watcher, move |_, _, event, _| {
+            if let FileMCPWatcherEvent::ConfigParsed {
+                provider: event_provider,
+                scan_origin,
+                ..
+            } = event
+                && *event_provider == provider
+                && let Some(sender) = tx.take()
+            {
+                let _ = sender.send(*scan_origin);
+            }
+        });
+    });
+    // Leak the collector so it (and its subscription) outlives this function; tests are
+    // short-lived, so this is acceptable.
+    std::mem::forget(collector);
+    rx
+}
+
+/// An existing home-subdir provider (e.g. `~/.codex`) must still be awaited by the initial
+/// global scan even though its read is delivered by the directory watcher's queued `on_scan`
+/// rather than a direct parse scheduled in `FileMCPWatcher::new`. Regression test for a bug
+/// where such sources were silently excluded from the cohort -- letting
+/// `InitialGlobalMcpScanComplete` fire (and settle `AgentDriver`'s first-turn wait) before the
+/// watcher-delivered read ever happened, reintroducing the first-turn-missing-tools bug for
+/// exactly the users who have that provider's config file.
+#[test]
+#[serial_test::serial]
+fn initial_global_scan_awaits_existing_subdir_provider_via_watcher() {
+    let home = tempfile::tempdir().expect("temp home should be created");
+    let codex_dir = home.path().join(".codex");
+    std::fs::create_dir_all(&codex_dir).expect("codex subdir should be created");
+    let codex_config_path = codex_dir.join("config.toml");
+    std::fs::write(
+        &codex_config_path,
+        "[mcp_servers.test-codex-server]\ncommand = \"npx\"\nargs = [\"-y\", \"test-server\"]\n",
+    )
+    .expect("codex config should be written");
+
+    let old_home = std::env::var_os("HOME");
+    // TODO: Audit that the environment access only happens in single-threaded code.
+    unsafe { std::env::set_var("HOME", home.path()) };
+
+    App::test((), |mut app| async move {
+        initialize_app_for_terminal_view(&mut app);
+        let watcher = app.add_singleton_model(FileMCPWatcher::new);
+
+        // The cohort must still be awaiting the Codex source right after construction: it was
+        // not scheduled as a direct parse (watching started), but it must not have been
+        // dropped from the cohort either.
+        watcher.read(&app, |watcher, _| {
+            assert!(
+                watcher
+                    .initial_global_scan_pending
+                    .contains(&(codex_config_path.clone(), MCPProvider::Codex)),
+                "an existing subdir provider must remain in the initial-global-scan cohort \
+                 while its watcher-delivered read is still pending"
+            );
+        });
+
+        let rx = watch_initial_global_scan_completions(&mut app, &watcher, 1);
+        let parsed_rx = watch_config_parsed_scan_origin(&mut app, &watcher, MCPProvider::Codex);
+
+        rx.await
+            .expect("the watcher-delivered read must still settle the initial scan");
+        let scan_origin = parsed_rx
+            .await
+            .expect("the watcher-delivered ConfigParsed for Codex should have been observed");
+        assert_eq!(
+            scan_origin,
+            FileMCPScanOrigin::InitialGlobal,
+            "the watcher-delivered ConfigParsed for an existing subdir provider must be \
+             attributed to the initial global scan, not treated as an ordinary update"
+        );
+    });
+
+    match old_home {
+        // TODO: Audit that the environment access only happens in single-threaded code.
+        Some(home) => unsafe { std::env::set_var("HOME", home) },
+        // TODO: Audit that the environment access only happens in single-threaded code.
+        None => unsafe { std::env::remove_var("HOME") },
+    }
+}
+
+/// A home-subdir provider whose directory doesn't exist yet must still settle immediately via
+/// a direct parse, exactly as before the cohort-membership fix above: that fix only changes
+/// *which sources are awaited*, never which path delivers a missing subdir's read.
+#[test]
+#[serial_test::serial]
+fn initial_global_scan_settles_missing_subdir_provider_via_direct_parse() {
+    let home = tempfile::tempdir().expect("temp home should be created");
+    let codex_config_path = home.path().join(".codex").join("config.toml");
+    // Deliberately do not create `.codex`, so `watch_home_provider_dir` fails synchronously
+    // and `FileMCPWatcher::new` falls back to scheduling a direct parse for the Codex source.
+
+    let old_home = std::env::var_os("HOME");
+    // TODO: Audit that the environment access only happens in single-threaded code.
+    unsafe { std::env::set_var("HOME", home.path()) };
+
+    App::test((), |mut app| async move {
+        initialize_app_for_terminal_view(&mut app);
+        let watcher = app.add_singleton_model(FileMCPWatcher::new);
+
+        let rx = watch_initial_global_scan_completions(&mut app, &watcher, 1);
+        rx.await
+            .expect("a missing subdir provider must still settle via a direct parse");
+        watcher.read(&app, |watcher, _| {
+            assert!(
+                !watcher
+                    .initial_global_scan_pending
+                    .contains(&(codex_config_path.clone(), MCPProvider::Codex)),
+                "a missing subdir provider's direct parse must settle its cohort obligation"
+            );
+        });
+    });
+
+    match old_home {
+        // TODO: Audit that the environment access only happens in single-threaded code.
+        Some(home) => unsafe { std::env::set_var("HOME", home) },
+        // TODO: Audit that the environment access only happens in single-threaded code.
+        None => unsafe { std::env::remove_var("HOME") },
+    }
 }
 
 /// A config removal with no replacement parse (e.g. the file was deleted) must still settle a

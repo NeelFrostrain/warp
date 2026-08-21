@@ -214,7 +214,14 @@ impl FileMCPWatcher {
 
         let mut home_provider_watchers = HashMap::new();
         let mut initial_config_parses = Vec::new();
+        // Every source scheduled below joins this cohort, regardless of how its read is
+        // delivered (a direct parse scheduled here, or the watcher's queued `on_scan`): the
+        // two are separate concerns, and `update_servers_from_config_file` checks this set
+        // (by `(config_path, provider)`) at schedule time to decide `startup_cohort`.
+        let mut initial_global_scan_pending: HashSet<(PathBuf, MCPProvider)> = HashSet::new();
         if let Some(mcp_config_path) = warp_managed_mcp_config_path() {
+            initial_global_scan_pending
+                .insert((mcp_config_path.config_path.clone(), MCPProvider::Warp));
             initial_config_parses.push((
                 mcp_config_path.config_path,
                 mcp_config_path.root_path,
@@ -245,6 +252,11 @@ impl FileMCPWatcher {
                 //   immediately (as `Missing`) rather than waiting indefinitely on a
                 //   directory watcher that may never fire. `HomeDirectoryWatcher` starts
                 //   watching the subdir once it is created.
+                //
+                // Either way, the source joins the cohort here, before we know which path
+                // will deliver its read: whether watching started only decides delivery, not
+                // whether the scan awaits it.
+                initial_global_scan_pending.insert((config_path.clone(), provider));
                 match home_subdir_to_watch(provider) {
                     None => {
                         initial_config_parses.push((config_path, home_dir.clone(), provider));
@@ -265,11 +277,6 @@ impl FileMCPWatcher {
                 }
             }
         }
-
-        let initial_global_scan_pending: HashSet<(PathBuf, MCPProvider)> = initial_config_parses
-            .iter()
-            .map(|(config_path, _, provider)| (config_path.clone(), *provider))
-            .collect();
 
         let mut watcher = Self {
             file_mcp_tx,
