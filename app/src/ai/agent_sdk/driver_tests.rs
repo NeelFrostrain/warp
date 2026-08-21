@@ -2204,6 +2204,14 @@ fn initial_global_mcp_readiness_wait_settles_immediately_when_config_removed_bef
 /// Regression test: the readiness wait previously only treated `Running` and `FailedToStart` as
 /// terminal, so a deleted config's `NotRunning` was ignored and the wait hung for the whole
 /// budget.
+///
+/// Drives the real `ConfigRemoved` → `DespawnServers` sequence through `FileBasedMCPManager`
+/// rather than injecting the `NotRunning` transition directly. The test harness's
+/// `TemplatableMCPServerManager` singleton (registered via `Default`, not the production
+/// `::new` constructor, so the suite doesn't need the auth/server-API singletons `::new` wires
+/// up) does not itself subscribe to `FileBasedMCPManagerEvent::DespawnServers`, so this test
+/// stands in for that one subscription — calling only the same public `shutdown_server` the
+/// production subscription calls — to let the rest of the removal sequence run for real.
 #[test]
 #[serial_test::serial]
 fn initial_global_mcp_readiness_wait_settles_on_notrunning_after_subscribing() {
@@ -2212,11 +2220,32 @@ fn initial_global_mcp_readiness_wait_settles_on_notrunning_after_subscribing() {
     App::test((), |mut app| async move {
         initialize_app_for_terminal_view(&mut app);
         let file_based_manager = setup_file_based_mcp_singletons(&mut app);
-        let Some(installation_uuid) =
-            simulate_completed_initial_global_scan_with_one_server(&mut app, &file_based_manager)
+        let Some((installation_uuid, config_path, root_path)) =
+            simulate_completed_initial_global_scan_with_one_server_and_paths(
+                &mut app,
+                &file_based_manager,
+            )
         else {
             return;
         };
+
+        // Stand in for the `DespawnServers` subscription that the production
+        // `TemplatableMCPServerManager::new` constructor wires up (and that this harness's
+        // `Default`-constructed singleton skips), so the real `ConfigRemoved` below drives a
+        // real `shutdown_server` call instead of a directly-injected state transition.
+        crate::ai::mcp::TemplatableMCPServerManager::handle(&app).update(
+            &mut app,
+            |_, ctx| {
+                let file_based_manager = FileBasedMCPManager::handle(ctx);
+                ctx.subscribe_to_model(&file_based_manager, |me, _, event, ctx| {
+                    if let crate::ai::mcp::file_based_manager::FileBasedMCPManagerEvent::DespawnServers { installation_uuids } = event {
+                        for uuid in installation_uuids {
+                            me.shutdown_server(*uuid, ctx);
+                        }
+                    }
+                });
+            },
+        );
 
         let terminal_view = add_window_with_terminal(&mut app, None);
         let driver_handle = app.add_model(|ctx| {
@@ -2225,8 +2254,8 @@ fn initial_global_mcp_readiness_wait_settles_on_notrunning_after_subscribing() {
             AgentDriver::new_for_test(std::env::temp_dir(), terminal_driver, ctx)
         });
 
-        // A generous configured timeout the readiness wait should NOT need: the NotRunning
-        // transition below must settle it almost immediately instead.
+        // A generous configured timeout the readiness wait should NOT need: the removal below
+        // must settle it almost immediately instead.
         let configured_timeout = Duration::from_secs(5);
         let (ready_tx, ready_rx) = futures::channel::oneshot::channel::<()>();
         driver_handle.update(&mut app, |driver, ctx| {
@@ -2240,25 +2269,161 @@ fn initial_global_mcp_readiness_wait_settles_on_notrunning_after_subscribing() {
             });
         });
 
-        // Simulate the despawn's synchronous shutdown outcome for an installation that never
-        // reached `Running` (the same transition `TemplatableMCPServerManager::shutdown_server`
-        // produces when a config is removed).
-        crate::ai::mcp::TemplatableMCPServerManager::handle(&app).update(
-            &mut app,
-            |manager, ctx| {
-                manager.change_server_state(
-                    installation_uuid,
-                    crate::ai::mcp::MCPServerState::NotRunning,
-                    ctx,
-                );
-            },
-        );
+        // Remove the global config, as if the file were deleted after the scan completed and
+        // the readiness wait had already subscribed. This is the real sequence: `ConfigRemoved`
+        // → `FileBasedMCPManager::remove_if_orphaned` → `DespawnServers` → (via the stand-in
+        // subscription above) `shutdown_server` → `NotRunning`.
+        file_based_manager.update(&mut app, |manager, ctx| {
+            manager.handle_watcher_event(
+                &FileMCPWatcherEvent::ConfigRemoved {
+                    config_path,
+                    root_path,
+                    provider: MCPProvider::Warp,
+                },
+                ctx,
+            );
+        });
 
         use warpui::r#async::FutureExt as _;
         ready_rx
             .with_timeout(Duration::from_millis(500))
             .await
-            .expect("the NotRunning transition should settle the wait promptly")
+            .expect("the removal's NotRunning transition should settle the wait promptly")
             .expect("readiness wait task should not have been dropped");
+    });
+}
+
+/// A wait that times out must tear down its own subscription before resolving: otherwise a
+/// later, unrelated terminal-state event for one of its still-pending UUIDs reaches its
+/// (still-installed) closure, which calls `unsubscribe_from_model` once its own pending set
+/// empties -- and that call removes *every* driver-to-manager subscription, silently killing a
+/// different, currently-active wait's subscription too. Regression test: start wait A with a
+/// short timeout, let it time out, start wait B for a different UUID, then drive A's UUID to a
+/// terminal state (the "late" event) and assert B is unaffected -- it must still resolve once
+/// its own UUID later settles.
+#[test]
+#[serial_test::serial]
+fn timed_out_wait_does_not_tear_down_a_later_waits_subscription() {
+    let _flag_guard = FeatureFlag::FileBasedMcp.override_enabled(true);
+
+    App::test((), |mut app| async move {
+        initialize_app_for_terminal_view(&mut app);
+        let file_based_manager = setup_file_based_mcp_singletons(&mut app);
+
+        // A root path of our own, distinct from `warp_managed_mcp_config_path()`: that real
+        // path is scanned in the background by the real `FileMCPWatcher` singleton `setup_
+        // file_based_mcp_singletons` just registered, and reconciling against it would race
+        // with (and could silently orphan) the servers this test injects below. Scope and
+        // auto-start eligibility don't matter here -- only that both installations are
+        // tracked (so `is_file_based_mcp_pending` finds their hash) and never reach a
+        // terminal state on their own. `handle_watcher_event` never touches the filesystem,
+        // so this path need not exist.
+        let root_path =
+            std::env::temp_dir().join(format!("warp-test-mcp-root-{}", uuid::Uuid::new_v4()));
+        let config_path = root_path.join(".mcp.json");
+        let parsed = ParsedTemplatableMCPServerResult::from_user_json(
+            r#"{"wait-a": {"command": "npx", "args": ["a"]}, "wait-b": {"command": "npx", "args": ["b"]}}"#,
+        )
+        .unwrap_or_default();
+        let (uuid_a, uuid_b) = file_based_manager.update(&mut app, |manager, ctx| {
+            manager.handle_watcher_event(
+                &FileMCPWatcherEvent::ConfigParsed {
+                    config_path,
+                    root_path,
+                    provider: MCPProvider::Warp,
+                    servers: parsed,
+                    scan_origin: FileMCPScanOrigin::Other,
+                },
+                ctx,
+            );
+            let uuid_for = |name: &str| {
+                manager
+                    .file_based_servers()
+                    .into_iter()
+                    .find(|installation| installation.templatable_mcp_server().name == name)
+                    .map(|installation| installation.uuid())
+                    .expect("the server should have been tracked")
+            };
+            (uuid_for("wait-a"), uuid_for("wait-b"))
+        });
+
+        let terminal_view = add_window_with_terminal(&mut app, None);
+        let driver_handle = app.add_model(|ctx| {
+            let terminal_driver =
+                super::terminal::TerminalDriver::create_from_existing_view(terminal_view, ctx);
+            AgentDriver::new_for_test(std::env::temp_dir(), terminal_driver, ctx)
+        });
+
+        // Wait A: a short timeout, so it genuinely times out (nothing ever settles uuid_a
+        // during this window) before wait B ever starts.
+        let (a_tx, a_rx) = futures::channel::oneshot::channel::<()>();
+        driver_handle.update(&mut app, |driver, ctx| {
+            let wait = driver.wait_for_file_based_mcps_running(
+                vec![uuid_a],
+                Duration::from_millis(50),
+                ctx,
+            );
+            ctx.spawn(wait, move |_, (), _| {
+                let _ = a_tx.send(());
+            });
+        });
+        a_rx.await.expect("wait A should resolve once it times out");
+
+        // Wait B starts only after A has already timed out, for a different UUID.
+        let (b_tx, mut b_rx) = futures::channel::oneshot::channel::<()>();
+        driver_handle.update(&mut app, |driver, ctx| {
+            let wait =
+                driver.wait_for_file_based_mcps_running(vec![uuid_b], Duration::from_secs(5), ctx);
+            ctx.spawn(wait, move |_, (), _| {
+                let _ = b_tx.send(());
+            });
+        });
+        assert!(
+            b_rx.try_recv().unwrap().is_none(),
+            "wait B must not resolve before its own uuid settles"
+        );
+
+        // The "late" terminal event for A's uuid: if A's subscription is still installed here,
+        // this reaches its stale closure and (A's pending set only ever held this one uuid)
+        // calls `unsubscribe_from_model`, tearing down every driver subscription -- B's too.
+        crate::ai::mcp::TemplatableMCPServerManager::handle(&app).update(
+            &mut app,
+            |manager, ctx| {
+                manager.change_server_state(uuid_a, crate::ai::mcp::MCPServerState::Running, ctx);
+            },
+        );
+        // If B's subscription were torn down here, dropping its closure would also drop its
+        // captured oneshot sender, which cancels B's internal receiver and resolves B's wait
+        // (via the non-fatal `Canceled` branch) almost immediately -- *before* B's own uuid
+        // ever settles. A plain, non-yielding check right after firing the event above cannot
+        // observe this: resolving the cancellation requires the executor to poll B's task at
+        // least once. Yield via a real timer first so that poll has a chance to happen, then
+        // assert B's channel is still empty -- catching a torn-down subscription regardless of
+        // whether it resolves via cancellation or (if B's own uuid happened to match) a
+        // spurious success.
+        warpui::r#async::Timer::after(Duration::from_millis(50)).await;
+        assert!(
+            b_rx.try_recv().unwrap().is_none(),
+            "A's late terminal event must not have torn down (and so resolved, however \
+             indirectly) B's subscription"
+        );
+
+        // B's own uuid settling must still resolve B normally, and must do so promptly via the
+        // event -- not via wait B's own multi-second internal timeout, which resolves the
+        // future regardless of whether its subscription is still installed and so would mask
+        // a torn-down subscription if this wait were unbounded.
+        crate::ai::mcp::TemplatableMCPServerManager::handle(&app).update(
+            &mut app,
+            |manager, ctx| {
+                manager.change_server_state(uuid_b, crate::ai::mcp::MCPServerState::Running, ctx);
+            },
+        );
+        use warpui::r#async::FutureExt as _;
+        b_rx.with_timeout(Duration::from_millis(500))
+            .await
+            .expect(
+                "wait B should resolve promptly via the event, not via its own internal timeout",
+            )
+            .expect("wait B's oneshot sender should not have been dropped");
     });
 }

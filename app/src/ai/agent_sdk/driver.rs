@@ -2143,6 +2143,11 @@ impl AgentDriver {
         let templatable_manager_handle = TemplatableMCPServerManager::handle(ctx);
         let pending_state_details_for_subscription = Arc::clone(&pending_state_details);
 
+        // Clear any stale subscription left behind by a previous wait (of this function or
+        // `wait_for_mcp_servers_started`) that timed out without being torn down, so it can't
+        // tear down this wait's subscription. See the cleanup on timeout below, which is what
+        // normally prevents that; this is defense-in-depth against the same race.
+        ctx.unsubscribe_from_model(&templatable_manager_handle);
         ctx.subscribe_to_model(
             &templatable_manager_handle,
             move |_me, manager, event, ctx| {
@@ -2187,6 +2192,7 @@ impl AgentDriver {
             },
         );
 
+        let spawner = ctx.spawner();
         Either::Left(async move {
             match rx.with_timeout(timeout).await {
                 Ok(Ok(())) => {}
@@ -2203,6 +2209,18 @@ impl AgentDriver {
                     log::warn!(
                         "Timed out waiting for file-based MCP servers to reach a terminal state; proceeding without. Still pending: {pending_details}"
                     );
+                    // The subscription is now stale; remove it so a later terminal state
+                    // change for one of the still-pending UUIDs can't reach this closure and
+                    // call `unsubscribe_from_model` itself, which would tear down every
+                    // driver-to-manager subscription -- including one installed by a
+                    // subsequent, unrelated wait. This completes before this future resolves,
+                    // so it cannot race with that subsequent wait's own subscription.
+                    let _ = spawner
+                        .spawn(|_, ctx| {
+                            let manager = TemplatableMCPServerManager::handle(ctx);
+                            ctx.unsubscribe_from_model(&manager);
+                        })
+                        .await;
                 }
             }
         })

@@ -10,8 +10,8 @@ use warpui::App;
 
 use super::{
     FileMCPConfigDiagnosticKind, FileMCPConfigParseOutcome, FileMCPWatcher, FileMCPWatcherEvent,
-    config_change_flags, home_subdir_to_watch, parse_mcp_config_file, providers_in_scope,
-    should_watch_repository, substitute_env_vars,
+    InFlightParse, config_change_flags, home_subdir_to_watch, parse_mcp_config_file,
+    providers_in_scope, should_watch_repository, substitute_env_vars,
 };
 use crate::ai::mcp::MCPProvider;
 
@@ -24,7 +24,8 @@ fn setup_watcher_with_pending(
 ) -> warpui::ModelHandle<FileMCPWatcher> {
     app.add_singleton_model(move |_ctx| FileMCPWatcher {
         file_mcp_tx: async_channel::unbounded().0,
-        parse_abort_handles: HashMap::new(),
+        in_flight_parses: HashMap::new(),
+        next_parse_generation: 0,
         home_provider_watchers: HashMap::new(),
         project_repo_watchers: HashSet::new(),
         cloud_env_pending: HashMap::new(),
@@ -49,7 +50,14 @@ fn abort_config_parse_cancels_and_removes_inflight_task() {
     let observed_handle = abort_handle.clone();
     let mut watcher = FileMCPWatcher {
         file_mcp_tx,
-        parse_abort_handles: HashMap::from([(key.clone(), abort_handle)]),
+        in_flight_parses: HashMap::from([(
+            key.clone(),
+            InFlightParse {
+                generation: 0,
+                abort_handle,
+            },
+        )]),
+        next_parse_generation: 1,
         home_provider_watchers: HashMap::new(),
         project_repo_watchers: HashSet::new(),
         cloud_env_pending: HashMap::new(),
@@ -60,7 +68,7 @@ fn abort_config_parse_cancels_and_removes_inflight_task() {
     watcher.abort_config_parse(&config_path, MCPProvider::Warp);
 
     assert!(observed_handle.is_aborted());
-    assert!(!watcher.parse_abort_handles.contains_key(&key));
+    assert!(!watcher.in_flight_parses.contains_key(&key));
 }
 
 #[test]
@@ -434,9 +442,13 @@ fn replaced_initial_parse_settles_via_replacement() {
         watcher.update(&mut app, |watcher, ctx| {
             // Simulate an in-flight initial parse for this key that is about to be aborted.
             let (abort_handle, _registration) = AbortHandle::new_pair();
-            watcher
-                .parse_abort_handles
-                .insert((config_path.clone(), MCPProvider::Warp), abort_handle);
+            watcher.in_flight_parses.insert(
+                (config_path.clone(), MCPProvider::Warp),
+                InFlightParse {
+                    generation: 0,
+                    abort_handle,
+                },
+            );
 
             // A file update schedules a replacement parse for the same key. This aborts the
             // simulated in-flight parse above and spawns a new one; the pending set must still
@@ -460,6 +472,82 @@ fn replaced_initial_parse_settles_via_replacement() {
     });
 }
 
+/// The core race behind a superseded parse's completion callback: its background future can
+/// already be queued on the foreground executor before a replacement's `AbortHandle::abort()`
+/// call takes effect (the framework applies `abort()` only the next time the aborted future is
+/// polled). Unlike [`replaced_initial_parse_settles_via_replacement`] (which only parks an inert
+/// `AbortHandle`, never invoking any callback logic), this drives the actual generation check a
+/// stale callback runs through: it must not be able to reclaim the source once a replacement has
+/// taken it over, and the replacement's own record must survive untouched.
+#[test]
+fn stale_completion_callback_cannot_reclaim_a_superseded_source() {
+    let dir = tempfile::tempdir().expect("temp dir should be created");
+    let root = dir.path().to_path_buf();
+    let config_path = root.join("config.json");
+    std::fs::write(&config_path, r#"{"mcpServers":{"test":{"command":"npx"}}}"#).unwrap();
+    let key = (config_path.clone(), MCPProvider::Warp);
+    let pending = HashSet::from([key.clone()]);
+
+    App::test((), |mut app| async move {
+        let watcher = setup_watcher_with_pending(&mut app, pending);
+        let rx = watch_initial_global_scan_completions(&mut app, &watcher, 1);
+
+        let stale_generation = watcher.update(&mut app, |watcher, ctx| {
+            // Schedule the original parse ("A") for this source and capture the generation a
+            // completion callback for it would have captured.
+            watcher.update_servers_from_config_file(
+                &config_path,
+                root.clone(),
+                MCPProvider::Warp,
+                ctx,
+            );
+            let stale_generation = watcher.in_flight_parses[&key].generation;
+
+            // Schedule a replacement ("B") for the same source before A's completion runs, as
+            // a rapid file edit would. This is the moment A's callback could already be queued
+            // on the foreground executor, ahead of the `abort()` inside this same call taking
+            // effect on A's background future.
+            watcher.update_servers_from_config_file(
+                &config_path,
+                root.clone(),
+                MCPProvider::Warp,
+                ctx,
+            );
+            let current_generation = watcher.in_flight_parses[&key].generation;
+            assert_ne!(
+                stale_generation, current_generation,
+                "the replacement must claim a fresh generation, not reuse A's"
+            );
+
+            stale_generation
+        });
+
+        // A's now-stale completion callback fires (out of process order): it must not be able
+        // to reclaim the source, since B's record currently owns it.
+        let reclaimed = watcher.update(&mut app, |watcher, _ctx| {
+            watcher.take_current_in_flight_parse(&key, stale_generation)
+        });
+        assert!(
+            !reclaimed,
+            "a stale callback must not be able to reclaim a source superseded by a replacement"
+        );
+        watcher.read(&app, |watcher, _| {
+            assert!(
+                watcher.in_flight_parses.contains_key(&key),
+                "the stale callback must not have removed the replacement's own record"
+            );
+            assert!(
+                watcher.initial_global_scan_pending.contains(&key),
+                "the stale callback must not have claimed or settled the cohort obligation"
+            );
+        });
+
+        // The replacement (B) itself, once it actually completes, must still settle the scan.
+        rx.await
+            .expect("the replacement's own completion should settle the initial scan");
+    });
+}
+
 /// A config removal with no replacement parse (e.g. the file was deleted) must still settle a
 /// pending initial-scan source; otherwise the scan would hang forever.
 #[test]
@@ -473,9 +561,13 @@ fn aborted_initial_parse_without_replacement_settles_scan() {
 
         watcher.update(&mut app, |watcher, ctx| {
             let (abort_handle, _registration) = AbortHandle::new_pair();
-            watcher
-                .parse_abort_handles
-                .insert((config_path.clone(), MCPProvider::Warp), abort_handle);
+            watcher.in_flight_parses.insert(
+                (config_path.clone(), MCPProvider::Warp),
+                InFlightParse {
+                    generation: 0,
+                    abort_handle,
+                },
+            );
 
             // The config was removed outright; no replacement parse follows.
             watcher.abort_config_parse_for_removal(&config_path, MCPProvider::Warp, ctx);
