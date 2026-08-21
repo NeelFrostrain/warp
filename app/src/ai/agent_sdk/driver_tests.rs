@@ -3,7 +3,7 @@ use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::{Duration, SystemTime};
+use std::time::Duration;
 
 use cloud_object_models::CodeForge;
 use futures::channel::oneshot;
@@ -1952,7 +1952,7 @@ fn initial_global_scan_wait_returns_cached_snapshot_immediately() {
 
         let wait_future = driver_handle.update(&mut app, |driver, ctx| {
             driver.wait_for_initial_global_file_based_mcp_scan(
-                SystemTime::now() + Duration::from_secs(20),
+                Instant::now() + Duration::from_secs(20),
                 ctx,
             )
         });
@@ -2103,7 +2103,7 @@ fn initial_global_scan_and_readiness_share_one_bounded_timeout_budget() {
         // completes deliberately close to this deadline, leaving only a small remainder for
         // the following readiness wait.
         let budget = Duration::from_millis(400);
-        let deadline = SystemTime::now() + budget;
+        let deadline = Instant::now() + budget;
 
         let scan_wait = driver_handle.update(&mut app, |driver, ctx| {
             driver.wait_for_initial_global_file_based_mcp_scan(deadline, ctx)
@@ -2122,9 +2122,7 @@ fn initial_global_scan_and_readiness_share_one_bounded_timeout_budget() {
 
         // The fix: pass only the remaining slice of the shared deadline into the readiness
         // wait instead of a fresh full timeout.
-        let remaining = deadline
-            .duration_since(SystemTime::now())
-            .unwrap_or(Duration::ZERO);
+        let remaining = deadline.saturating_duration_since(Instant::now());
         let readiness_wait = driver_handle.update(&mut app, |driver, ctx| {
             driver.wait_for_file_based_mcps_running(wait_uuids, remaining, ctx)
         });

@@ -20,6 +20,7 @@ use futures::FutureExt as _;
 use futures::channel::oneshot;
 use futures::future::{self, Either, join_all};
 use handlebars::get_arguments;
+use instant::Instant;
 use itertools::Itertools as _;
 use oneshot::{Canceled, Receiver};
 use repo_metadata::local_model::IndexedRepoState;
@@ -2218,13 +2219,14 @@ impl AgentDriver {
     /// transient completion event, bounded by `deadline`, only when the scan is still pending.
     /// Non-fatal: always resolves, with an empty snapshot on timeout or cancellation.
     ///
-    /// `deadline` is shared with the caller's subsequent readiness wait (see
-    /// [`Self::wait_for_file_based_mcps_running`]) so scan completion and server readiness stay
-    /// one bounded phase under the MCP startup timeout, rather than each getting its own full
-    /// timeout.
+    /// `deadline` is a monotonic instant (not wall-clock time, which a backward clock
+    /// correction could push the remaining budget past its intended bound) shared with the
+    /// caller's subsequent readiness wait (see [`Self::wait_for_file_based_mcps_running`]) so
+    /// scan completion and server readiness stay one bounded phase under the MCP startup
+    /// timeout, rather than each getting its own full timeout.
     fn wait_for_initial_global_file_based_mcp_scan(
         &self,
-        deadline: SystemTime,
+        deadline: Instant,
         ctx: &mut ModelContext<Self>,
     ) -> impl Future<Output = Vec<Uuid>> + use<> {
         let manager = FileBasedMCPManager::handle(ctx);
@@ -2245,9 +2247,7 @@ impl AgentDriver {
             }
         });
 
-        let remaining = deadline
-            .duration_since(SystemTime::now())
-            .unwrap_or(Duration::ZERO);
+        let remaining = deadline.saturating_duration_since(Instant::now());
         Either::Left(async move {
             match rx.with_timeout(remaining).await {
                 Ok(Ok(uuids)) => uuids,
@@ -3021,8 +3021,9 @@ impl AgentDriver {
                 // `initial_global_mcp_deadline` is shared across both waits so scan
                 // completion and server readiness are one bounded phase under
                 // `MCP_SERVER_STARTUP_TIMEOUT`, rather than each getting its own full
-                // timeout.
-                let initial_global_mcp_deadline = SystemTime::now() + MCP_SERVER_STARTUP_TIMEOUT;
+                // timeout. Monotonic (not `SystemTime`): a backward wall-clock correction
+                // must never let the remaining budget grow past the original timeout.
+                let initial_global_mcp_deadline = Instant::now() + MCP_SERVER_STARTUP_TIMEOUT;
                 let initial_global_scan_wait = foreground
                     .spawn(move |me, ctx| {
                         me.wait_for_initial_global_file_based_mcp_scan(
@@ -3042,8 +3043,7 @@ impl AgentDriver {
                     setup_events
                         .record_result(SetupStep::InitialGlobalMcpReadiness, async {
                             let remaining_readiness_timeout = initial_global_mcp_deadline
-                                .duration_since(SystemTime::now())
-                                .unwrap_or(Duration::ZERO);
+                                .saturating_duration_since(Instant::now());
                             foreground
                                 .spawn(move |me, ctx| {
                                     me.wait_for_file_based_mcps_running(
