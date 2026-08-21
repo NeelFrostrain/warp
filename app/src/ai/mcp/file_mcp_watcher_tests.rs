@@ -579,6 +579,51 @@ fn watch_config_parsed_scan_origin(
     rx
 }
 
+/// If the directory watcher's registration for a home-subdir provider fails
+/// *asynchronously* -- after `start_watching` already queued its initial scan -- `stop_watching`
+/// removes the subscription before that scan can find it, so no `on_scan` (and so no config
+/// parse) ever arrives. Regression test for the resulting stall: `settle_stranded_subdir_configs`
+/// (called from that failure handler) must parse the affected provider config directly,
+/// settling any pending initial-scan obligation instead of leaving it to block until the
+/// caller's timeout.
+#[test]
+fn registration_failure_settles_stranded_subdir_provider_directly() {
+    let dir = tempfile::tempdir().expect("temp dir should be created");
+    let home_dir = dir.path().to_path_buf();
+    let codex_dir = home_dir.join(".codex");
+    std::fs::create_dir_all(&codex_dir).expect("codex subdir should be created");
+    let codex_config_path = codex_dir.join("config.toml");
+    std::fs::write(
+        &codex_config_path,
+        "[mcp_servers.test-codex-server]\ncommand = \"npx\"\nargs = [\"-y\", \"test-server\"]\n",
+    )
+    .expect("codex config should be written");
+
+    let pending = HashSet::from([(codex_config_path, MCPProvider::Codex)]);
+
+    App::test((), |mut app| async move {
+        let watcher = setup_watcher_with_pending(&mut app, pending);
+        let rx = watch_initial_global_scan_completions(&mut app, &watcher, 1);
+        let parsed_rx = watch_config_parsed_scan_origin(&mut app, &watcher, MCPProvider::Codex);
+
+        watcher.update(&mut app, |watcher, ctx| {
+            watcher.settle_stranded_subdir_configs(&codex_dir, home_dir.clone(), ctx);
+        });
+
+        rx.await
+            .expect("the direct parse from the failure handler must settle the initial scan");
+        let scan_origin = parsed_rx
+            .await
+            .expect("the direct parse for Codex should have been observed");
+        assert_eq!(
+            scan_origin,
+            FileMCPScanOrigin::InitialGlobal,
+            "the stranded source's direct parse must still be attributed to the initial \
+             global scan"
+        );
+    });
+}
+
 /// An existing home-subdir provider (e.g. `~/.codex`) must still be awaited by the initial
 /// global scan even though its read is delivered by the directory watcher's queued `on_scan`
 /// rather than a direct parse scheduled in `FileMCPWatcher::new`. Regression test for a bug

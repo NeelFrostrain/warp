@@ -396,10 +396,17 @@ impl FileMCPWatcher {
     ///
     /// Returns `true` if the subdir is (now, or already) being watched, meaning a subscriber
     /// `on_scan` has been (or will be) scheduled for it: `Repository::start_watching` queues
-    /// the scan unconditionally, independent of whether the filesystem-watcher registration
-    /// itself later succeeds. Callers must not *also* schedule a direct initial parse for the
-    /// same source in that case. Returns `false` when watching could not even be started (e.g.
-    /// the subdir doesn't exist yet), so the caller must parse directly to settle the source.
+    /// the scan unconditionally at registration time. Callers must not *also* schedule a
+    /// direct initial parse for the same source in that case. Returns `false` when watching
+    /// could not even be started synchronously (e.g. the subdir doesn't exist yet), so the
+    /// caller must parse directly to settle the source.
+    ///
+    /// A queued scan is not, however, a guarantee of delivery: if the filesystem-watcher
+    /// registration itself fails *asynchronously* (after this returns `true`), the error
+    /// handler spawned below removes the subscription before the queued scan task can
+    /// necessarily find it, so no `on_scan` -- and so no config parse -- ever arrives for any
+    /// provider config under the subdir. That handler settles them directly instead of
+    /// leaving them to block until the caller's timeout.
     fn watch_home_provider_dir(
         subdir_path: &Path,
         home_dir: PathBuf,
@@ -431,6 +438,7 @@ impl FileMCPWatcher {
             }
         };
 
+        let home_dir_for_error = home_dir.clone();
         let subscriber = Box::new(FileMCPSubscriber {
             stored_dir: home_dir,
             message_tx: file_mcp_tx,
@@ -456,9 +464,30 @@ impl FileMCPWatcher {
                 repo_handle.update(ctx, |repo, ctx| {
                     repo.stop_watching(subscriber_id, ctx);
                 });
+                me.settle_stranded_subdir_configs(&subdir_path_owned, home_dir_for_error, ctx);
             }
         });
         true
+    }
+
+    /// Directly parses every provider config under `subdir_path` (e.g. `~/.codex/config.toml`
+    /// under `~/.codex`), because the directory watcher's queued initial scan for it will
+    /// never arrive: [`Self::watch_home_provider_dir`]'s registration-failure handler calls
+    /// this after `stop_watching` has already removed the subscription the queued scan needed
+    /// to find. Without this, any of those sources still pending in
+    /// `initial_global_scan_pending` would block until the caller's timeout instead of
+    /// settling.
+    fn settle_stranded_subdir_configs(
+        &mut self,
+        subdir_path: &Path,
+        home_dir: PathBuf,
+        ctx: &mut ModelContext<Self>,
+    ) {
+        for (provider, config_path) in
+            providers_in_scope(home_dir.clone(), subdir_path.to_path_buf())
+        {
+            self.update_servers_from_config_file(&config_path, home_dir.clone(), provider, ctx);
+        }
     }
 
     /// Handle incoming home directory watcher events.
