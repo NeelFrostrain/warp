@@ -6,13 +6,32 @@ use futures::stream::AbortHandle;
 use repo_metadata::repositories::RepoDetectionSource;
 use repo_metadata::{RepositoryUpdate, TargetFile};
 use settings::SettingsMode;
+use warpui::App;
 
 use super::{
-    FileMCPConfigDiagnosticKind, FileMCPConfigParseOutcome, FileMCPWatcher, config_change_flags,
-    home_subdir_to_watch, parse_mcp_config_file, providers_in_scope, should_watch_repository,
-    substitute_env_vars,
+    FileMCPConfigDiagnosticKind, FileMCPConfigParseOutcome, FileMCPWatcher, FileMCPWatcherEvent,
+    config_change_flags, home_subdir_to_watch, parse_mcp_config_file, providers_in_scope,
+    should_watch_repository, substitute_env_vars,
 };
 use crate::ai::mcp::MCPProvider;
+
+/// Constructs a `FileMCPWatcher` singleton with an explicit initial-global-scan pending set,
+/// bypassing the real home-directory scan in `FileMCPWatcher::new` so tests are deterministic
+/// regardless of what actually exists on the test machine's filesystem.
+fn setup_watcher_with_pending(
+    app: &mut App,
+    pending: HashSet<(PathBuf, MCPProvider)>,
+) -> warpui::ModelHandle<FileMCPWatcher> {
+    app.add_singleton_model(move |_ctx| FileMCPWatcher {
+        file_mcp_tx: async_channel::unbounded().0,
+        parse_abort_handles: HashMap::new(),
+        home_provider_watchers: HashMap::new(),
+        project_repo_watchers: HashSet::new(),
+        cloud_env_pending: HashMap::new(),
+        initial_global_scan_pending: pending,
+        initial_global_scan_emitted: false,
+    })
+}
 
 fn cleanup_env_vars(vars: &[&str]) {
     for var in vars {
@@ -34,6 +53,8 @@ fn abort_config_parse_cancels_and_removes_inflight_task() {
         home_provider_watchers: HashMap::new(),
         project_repo_watchers: HashSet::new(),
         cloud_env_pending: HashMap::new(),
+        initial_global_scan_pending: HashSet::new(),
+        initial_global_scan_emitted: false,
     };
 
     watcher.abort_config_parse(&config_path, MCPProvider::Warp);
@@ -259,4 +280,211 @@ async fn parse_outcomes_distinguish_missing_invalid_and_valid_configs() {
         FileMCPConfigParseOutcome::Parsed(servers) => assert_eq!(servers.len(), 1),
         _ => panic!("valid config should produce one server"),
     }
+}
+
+/// Test-only collector model. A separate model is required to subscribe to `FileMCPWatcher`
+/// events in tests: a model may not subscribe to its own events, so the assertions below
+/// (`watch_initial_global_scan_completions`) subscribe from this standalone entity instead.
+struct WatcherEventCollector;
+
+impl warpui::Entity for WatcherEventCollector {
+    type Event = ();
+}
+
+/// Subscribes to `FileMCPWatcher` and returns a future that resolves once
+/// `InitialGlobalMcpScanComplete` has been observed `expected_count` times, using a shared
+/// counter so callers can also assert an exact emission count after the fact.
+fn watch_initial_global_scan_completions(
+    app: &mut App,
+    watcher: &warpui::ModelHandle<FileMCPWatcher>,
+    expected_count: usize,
+) -> futures::channel::oneshot::Receiver<()> {
+    let (tx, rx) = futures::channel::oneshot::channel::<()>();
+    let mut tx = Some(tx);
+    let count = std::rc::Rc::new(std::cell::RefCell::new(0usize));
+    let collector = app.add_model(|_| WatcherEventCollector);
+    collector.update(app, |_, ctx| {
+        ctx.subscribe_to_model(watcher, move |_, _, event, _| {
+            if matches!(event, FileMCPWatcherEvent::InitialGlobalMcpScanComplete) {
+                *count.borrow_mut() += 1;
+                if *count.borrow() == expected_count
+                    && let Some(sender) = tx.take()
+                {
+                    let _ = sender.send(());
+                }
+            }
+        });
+    });
+    // Leak the collector so it (and its subscription) outlives this function; tests are
+    // short-lived, so this is acceptable.
+    std::mem::forget(collector);
+    rx
+}
+
+/// The initial global scan must settle once every scheduled source has produced a terminal
+/// parse outcome, whether that outcome is a valid parse, a missing file, or an invalid config.
+#[test]
+fn initial_global_scan_settles_after_parsed_missing_and_invalid_sources() {
+    let dir = tempfile::tempdir().expect("temp dir should be created");
+    let root = dir.path().to_path_buf();
+    let parsed_path = root.join("parsed.json");
+    std::fs::write(&parsed_path, r#"{"mcpServers":{"test":{"command":"npx"}}}"#).unwrap();
+    let missing_path = root.join("missing.json");
+    let invalid_path = root.join("invalid.json");
+    std::fs::write(&invalid_path, "{invalid").unwrap();
+
+    let pending = HashSet::from([
+        (parsed_path.clone(), MCPProvider::Warp),
+        (missing_path.clone(), MCPProvider::Claude),
+        (invalid_path.clone(), MCPProvider::Codex),
+    ]);
+
+    App::test((), |mut app| async move {
+        let watcher = setup_watcher_with_pending(&mut app, pending);
+        let rx = watch_initial_global_scan_completions(&mut app, &watcher, 1);
+
+        watcher.update(&mut app, |watcher, ctx| {
+            watcher.update_servers_from_config_file(
+                &parsed_path,
+                root.clone(),
+                MCPProvider::Warp,
+                ctx,
+            );
+            watcher.update_servers_from_config_file(
+                &missing_path,
+                root.clone(),
+                MCPProvider::Claude,
+                ctx,
+            );
+            watcher.update_servers_from_config_file(
+                &invalid_path,
+                root.clone(),
+                MCPProvider::Codex,
+                ctx,
+            );
+        });
+
+        rx.await
+            .expect("initial global scan should settle after mixed terminal outcomes");
+        watcher.read(&app, |watcher, _| {
+            assert!(
+                watcher.initial_global_scan_pending.is_empty(),
+                "pending set should be drained once every source settles"
+            );
+        });
+    });
+}
+
+/// `InitialGlobalMcpScanComplete` must fire exactly once, even if settlement logic runs again
+/// afterward (e.g. a later, unrelated parse completion).
+#[test]
+fn initial_global_scan_completion_event_fires_exactly_once() {
+    let dir = tempfile::tempdir().expect("temp dir should be created");
+    let root = dir.path().to_path_buf();
+    let missing_path = root.join("missing.json");
+    let pending = HashSet::from([(missing_path.clone(), MCPProvider::Warp)]);
+
+    App::test((), |mut app| async move {
+        let watcher = setup_watcher_with_pending(&mut app, pending);
+        let rx = watch_initial_global_scan_completions(&mut app, &watcher, 1);
+
+        watcher.update(&mut app, |watcher, ctx| {
+            watcher.update_servers_from_config_file(
+                &missing_path,
+                root.clone(),
+                MCPProvider::Warp,
+                ctx,
+            );
+        });
+        rx.await.expect("initial global scan should settle");
+
+        // Driving the completion check again after settlement (as a later, unrelated parse
+        // completion would) must not re-emit the event. There is no positive event to await
+        // here (that's the point), so bound the wait instead of hanging forever.
+        let second_rx = watch_initial_global_scan_completions(&mut app, &watcher, 1);
+        watcher.update(&mut app, |watcher, ctx| {
+            watcher.maybe_emit_initial_global_scan_complete(ctx);
+        });
+        use warpui::r#async::FutureExt as _;
+        assert!(
+            second_rx
+                .with_timeout(std::time::Duration::from_millis(200))
+                .await
+                .is_err(),
+            "a second subscriber should never observe a second completion event"
+        );
+    });
+}
+
+/// If an initial parse is aborted because a file update schedules a replacement (e.g. the file
+/// changed while the initial parse was still in flight), the replacement's completion must
+/// still settle the initial-scan obligation for that source.
+#[test]
+fn replaced_initial_parse_settles_via_replacement() {
+    let dir = tempfile::tempdir().expect("temp dir should be created");
+    let root = dir.path().to_path_buf();
+    let config_path = root.join("config.json");
+    std::fs::write(&config_path, r#"{"mcpServers":{"test":{"command":"npx"}}}"#).unwrap();
+    let pending = HashSet::from([(config_path.clone(), MCPProvider::Warp)]);
+
+    App::test((), |mut app| async move {
+        let watcher = setup_watcher_with_pending(&mut app, pending);
+        let rx = watch_initial_global_scan_completions(&mut app, &watcher, 1);
+
+        watcher.update(&mut app, |watcher, ctx| {
+            // Simulate an in-flight initial parse for this key that is about to be aborted.
+            let (abort_handle, _registration) = AbortHandle::new_pair();
+            watcher
+                .parse_abort_handles
+                .insert((config_path.clone(), MCPProvider::Warp), abort_handle);
+
+            // A file update schedules a replacement parse for the same key. This aborts the
+            // simulated in-flight parse above and spawns a new one; the pending set must still
+            // contain the key so the replacement's completion settles the scan.
+            watcher.update_servers_from_config_file(
+                &config_path,
+                root.clone(),
+                MCPProvider::Warp,
+                ctx,
+            );
+            assert!(
+                watcher
+                    .initial_global_scan_pending
+                    .contains(&(config_path.clone(), MCPProvider::Warp)),
+                "the obligation must transfer to the replacement, not be dropped on abort"
+            );
+        });
+
+        rx.await
+            .expect("the replacement parse should settle the initial scan");
+    });
+}
+
+/// A config removal with no replacement parse (e.g. the file was deleted) must still settle a
+/// pending initial-scan source; otherwise the scan would hang forever.
+#[test]
+fn aborted_initial_parse_without_replacement_settles_scan() {
+    let config_path = PathBuf::from("/tmp/removed-during-initial-scan.json");
+    let pending = HashSet::from([(config_path.clone(), MCPProvider::Warp)]);
+
+    App::test((), |mut app| async move {
+        let watcher = setup_watcher_with_pending(&mut app, pending);
+        let rx = watch_initial_global_scan_completions(&mut app, &watcher, 1);
+
+        watcher.update(&mut app, |watcher, ctx| {
+            let (abort_handle, _registration) = AbortHandle::new_pair();
+            watcher
+                .parse_abort_handles
+                .insert((config_path.clone(), MCPProvider::Warp), abort_handle);
+
+            // The config was removed outright; no replacement parse follows.
+            watcher.abort_config_parse_for_removal(&config_path, MCPProvider::Warp, ctx);
+        });
+
+        rx.await
+            .expect("removal without a replacement must still settle the initial scan");
+        watcher.read(&app, |watcher, _| {
+            assert!(watcher.initial_global_scan_pending.is_empty());
+        });
+    });
 }

@@ -44,13 +44,19 @@ use crate::ai::agent::{
 use crate::ai::agent_sdk::task_env_vars;
 use crate::ai::ambient_agents::AmbientAgentTaskId;
 use crate::ai::cloud_environments::{GithubRepo, SourceRepo};
-use crate::ai::mcp::JSONTransportType;
 use crate::ai::mcp::builtin::{FACTORY_MCP_INSTALLATION_UUID, FACTORY_MCP_SERVER_NAME};
+use crate::ai::mcp::file_based_manager::FileBasedMCPManager;
+use crate::ai::mcp::file_mcp_watcher::FileMCPScanOrigin;
 use crate::ai::mcp::parsing::normalize_mcp_json;
+use crate::ai::mcp::{
+    FileMCPWatcher, FileMCPWatcherEvent, JSONTransportType, MCPProvider,
+    ParsedTemplatableMCPServerResult,
+};
 use crate::ai::skills::SkillManager;
 use crate::auth::credentials::Credentials;
 use crate::server::server_api::managed_mcp::MockManagedMcpClient;
 use crate::test_util::terminal::{add_window_with_terminal, initialize_app_for_terminal_view};
+use crate::warp_managed_paths_watcher::warp_managed_mcp_config_path;
 
 #[test]
 fn test_normalize_single_cli_server() {
@@ -1821,4 +1827,187 @@ fn openai_api_key_exports_only_api_key_not_base_url() {
         !env_vars.contains_key(&OsString::from("OPENAI_BASE_URL")),
         "OPENAI_BASE_URL should NOT be exported as an env var"
     );
+}
+
+// ── First-turn readiness for the initial global file-based MCP scan ─────────
+
+/// Registers the additional singletons `initialize_app_for_terminal_view` does not already
+/// provide but that the real `FileMCPWatcher`/`FileBasedMCPManager` pipeline needs, then
+/// returns the `FileBasedMCPManager` handle.
+fn setup_file_based_mcp_singletons(app: &mut App) -> warpui::ModelHandle<FileBasedMCPManager> {
+    // `AISettings` (and, transitively, `FocusedTerminalInfo`) are already registered by
+    // `initialize_app_for_terminal_view`.
+    app.add_singleton_model(FileMCPWatcher::new);
+    app.add_singleton_model(FileBasedMCPManager::new)
+}
+
+/// Simulates the initial global scan discovering and auto-starting one global Warp MCP
+/// server, then completing. Returns the installation UUID.
+fn simulate_completed_initial_global_scan_with_one_server(
+    app: &mut App,
+    file_based_manager: &warpui::ModelHandle<FileBasedMCPManager>,
+) -> Option<uuid::Uuid> {
+    let warp_mcp_config_path = warp_managed_mcp_config_path()?;
+    let parsed = ParsedTemplatableMCPServerResult::from_user_json(
+        r#"{"global-warp": {"command": "npx", "args": ["warp"]}}"#,
+    )
+    .unwrap_or_default();
+
+    Some(file_based_manager.update(app, |manager, ctx| {
+        manager.handle_watcher_event(
+            &FileMCPWatcherEvent::ConfigParsed {
+                config_path: warp_mcp_config_path.config_path.clone(),
+                root_path: warp_mcp_config_path.root_path.clone(),
+                provider: MCPProvider::Warp,
+                servers: parsed,
+                scan_origin: FileMCPScanOrigin::InitialGlobal,
+            },
+            ctx,
+        );
+        manager.handle_watcher_event(&FileMCPWatcherEvent::InitialGlobalMcpScanComplete, ctx);
+        manager
+            .global_warp_servers()
+            .into_iter()
+            .map(|s| s.uuid())
+            .next()
+            .expect("the global Warp server should have been auto-started")
+    }))
+}
+
+/// `wait_for_initial_global_file_based_mcp_scan` must return the cached wait-set snapshot
+/// immediately (no event subscription needed) when the scan already completed before the
+/// driver was constructed — the scenario that matters for `AgentDriver`, since application
+/// model initialization typically finishes this scan long before any particular run exists.
+#[test]
+#[serial_test::serial]
+fn initial_global_scan_wait_returns_cached_snapshot_immediately() {
+    let _flag_guard = FeatureFlag::FileBasedMcp.override_enabled(true);
+
+    App::test((), |mut app| async move {
+        initialize_app_for_terminal_view(&mut app);
+        let file_based_manager = setup_file_based_mcp_singletons(&mut app);
+        let Some(installation_uuid) =
+            simulate_completed_initial_global_scan_with_one_server(&mut app, &file_based_manager)
+        else {
+            return;
+        };
+
+        let terminal_view = add_window_with_terminal(&mut app, None);
+        let driver_handle = app.add_model(|ctx| {
+            let terminal_driver =
+                super::terminal::TerminalDriver::create_from_existing_view(terminal_view, ctx);
+            AgentDriver::new_for_test(std::env::temp_dir(), terminal_driver, ctx)
+        });
+
+        let wait_future = driver_handle.update(&mut app, |driver, ctx| {
+            driver.wait_for_initial_global_file_based_mcp_scan(ctx)
+        });
+        let wait_uuids = wait_future.await;
+        assert_eq!(
+            wait_uuids,
+            vec![installation_uuid],
+            "the cached snapshot should be returned without waiting for a new event"
+        );
+    });
+}
+
+/// The readiness wait must not resolve while an auto-started initial-global server is still
+/// starting, and must unblock as soon as it reaches `Running`.
+#[test]
+#[serial_test::serial]
+fn initial_global_mcp_readiness_wait_unblocks_on_running() {
+    let _flag_guard = FeatureFlag::FileBasedMcp.override_enabled(true);
+
+    App::test((), |mut app| async move {
+        initialize_app_for_terminal_view(&mut app);
+        let file_based_manager = setup_file_based_mcp_singletons(&mut app);
+        let Some(installation_uuid) =
+            simulate_completed_initial_global_scan_with_one_server(&mut app, &file_based_manager)
+        else {
+            return;
+        };
+
+        let terminal_view = add_window_with_terminal(&mut app, None);
+        let driver_handle = app.add_model(|ctx| {
+            let terminal_driver =
+                super::terminal::TerminalDriver::create_from_existing_view(terminal_view, ctx);
+            AgentDriver::new_for_test(std::env::temp_dir(), terminal_driver, ctx)
+        });
+
+        let (ready_tx, mut ready_rx) = futures::channel::oneshot::channel::<()>();
+        driver_handle.update(&mut app, |driver, ctx| {
+            let wait = driver.wait_for_file_based_mcps_running(vec![installation_uuid], ctx);
+            ctx.spawn(wait, move |_, (), _| {
+                let _ = ready_tx.send(());
+            });
+        });
+
+        assert!(
+            ready_rx.try_recv().unwrap().is_none(),
+            "must not resolve while the server is still starting"
+        );
+
+        crate::ai::mcp::TemplatableMCPServerManager::handle(&app).update(
+            &mut app,
+            |manager, ctx| {
+                manager.change_server_state(
+                    installation_uuid,
+                    crate::ai::mcp::MCPServerState::Running,
+                    ctx,
+                );
+            },
+        );
+
+        ready_rx
+            .await
+            .expect("readiness wait should resolve once the server reaches Running");
+    });
+}
+
+/// The readiness wait must also unblock — rather than hang — when the server reaches
+/// `FailedToStart`, matching the run's degraded-startup policy.
+#[test]
+#[serial_test::serial]
+fn initial_global_mcp_readiness_wait_unblocks_on_failed_to_start() {
+    let _flag_guard = FeatureFlag::FileBasedMcp.override_enabled(true);
+
+    App::test((), |mut app| async move {
+        initialize_app_for_terminal_view(&mut app);
+        let file_based_manager = setup_file_based_mcp_singletons(&mut app);
+        let Some(installation_uuid) =
+            simulate_completed_initial_global_scan_with_one_server(&mut app, &file_based_manager)
+        else {
+            return;
+        };
+
+        let terminal_view = add_window_with_terminal(&mut app, None);
+        let driver_handle = app.add_model(|ctx| {
+            let terminal_driver =
+                super::terminal::TerminalDriver::create_from_existing_view(terminal_view, ctx);
+            AgentDriver::new_for_test(std::env::temp_dir(), terminal_driver, ctx)
+        });
+
+        let (ready_tx, ready_rx) = futures::channel::oneshot::channel::<()>();
+        driver_handle.update(&mut app, |driver, ctx| {
+            let wait = driver.wait_for_file_based_mcps_running(vec![installation_uuid], ctx);
+            ctx.spawn(wait, move |_, (), _| {
+                let _ = ready_tx.send(());
+            });
+        });
+
+        crate::ai::mcp::TemplatableMCPServerManager::handle(&app).update(
+            &mut app,
+            |manager, ctx| {
+                manager.change_server_state(
+                    installation_uuid,
+                    crate::ai::mcp::MCPServerState::FailedToStart,
+                    ctx,
+                );
+            },
+        );
+
+        ready_rx
+            .await
+            .expect("readiness wait should resolve (not hang) once the server FailedToStart");
+    });
 }

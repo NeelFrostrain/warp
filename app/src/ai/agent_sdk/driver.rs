@@ -2179,6 +2179,58 @@ impl AgentDriver {
         })
     }
 
+    /// Await the one-time initial global home-config MCP scan (e.g. `~/.warp/.mcp.json`,
+    /// `~/.claude.json`, `~/.codex/config.toml`), returning the UUIDs of servers that were
+    /// actually auto-start requested while it ran.
+    ///
+    /// Checks [`FileBasedMCPManager::initial_global_scan_result`] first: `FileMCPWatcher` and
+    /// `FileBasedMCPManager` schedule — and often finish — this scan during application model
+    /// initialization, well before any particular run's `AgentDriver` exists, so the scan has
+    /// frequently already completed by the time this runs. Falls back to subscribing for the
+    /// transient completion event, bounded by the MCP startup timeout, only when the scan is
+    /// still pending. Non-fatal: always resolves, with an empty snapshot on timeout or
+    /// cancellation.
+    fn wait_for_initial_global_file_based_mcp_scan(
+        &self,
+        ctx: &mut ModelContext<Self>,
+    ) -> impl Future<Output = Vec<Uuid>> + use<> {
+        let manager = FileBasedMCPManager::handle(ctx);
+        if let Some(wait_uuids) = manager.as_ref(ctx).initial_global_scan_result() {
+            return Either::Right(future::ready(wait_uuids));
+        }
+
+        log::info!("Waiting for the initial global file-based MCP scan to complete...");
+        let (tx, rx) = oneshot::channel::<Vec<Uuid>>();
+        let mut tx = Some(tx);
+        ctx.subscribe_to_model(&manager, move |_me, manager_handle, event, ctx| {
+            if let FileBasedMCPManagerEvent::InitialGlobalMcpScanComplete { wait_server_uuids } =
+                event
+                && let Some(sender) = tx.take()
+            {
+                let _ = sender.send(wait_server_uuids.clone());
+                ctx.unsubscribe_from_model(&manager_handle);
+            }
+        });
+
+        Either::Left(async move {
+            match rx.with_timeout(MCP_SERVER_STARTUP_TIMEOUT).await {
+                Ok(Ok(uuids)) => uuids,
+                Ok(Err(Canceled)) => {
+                    log::warn!(
+                        "Initial global file-based MCP scan subscription dropped early; proceeding without"
+                    );
+                    vec![]
+                }
+                Err(TimeoutError) => {
+                    log::warn!(
+                        "Timed out waiting for the initial global file-based MCP scan to complete; proceeding without"
+                    );
+                    vec![]
+                }
+            }
+        })
+    }
+
     /// Resolve global skill specs and the GitHub repositories that should be cloned for them.
     async fn resolve_global_skills(
         foreground: &ModelSpawner<Self>,
@@ -2914,6 +2966,44 @@ impl AgentDriver {
         // they are dropped automatically when the harness result resolves.
         match task.harness {
             HarnessKind::Oz => {
+                // First-turn readiness barrier for auto-discovered global home-file MCP
+                // servers (`~/.warp/.mcp.json`, `~/.claude.json`, `~/.codex/config.toml`,
+                // etc.). `FileMCPWatcher`/`FileBasedMCPManager` schedule this scan during
+                // application model initialization, well before this run's `AgentDriver`
+                // even exists, so it overlaps with (and often finishes before) all of the
+                // MCP, shared-session, environment, and skill setup above. Placed as the
+                // final join right before the first turn so a slow global server is still
+                // active before the initial request's tool context is serialized, without
+                // adding a new serialization point ahead of any of that other setup.
+                // Bounded and non-fatal: see `wait_for_initial_global_file_based_mcp_scan`
+                // and `wait_for_file_based_mcps_running`.
+                let initial_global_scan_wait = foreground
+                    .spawn(|me, ctx| me.wait_for_initial_global_file_based_mcp_scan(ctx))
+                    .await?;
+                let initial_global_wait_uuids = setup_events
+                    .record_value(SetupStep::InitialGlobalMcpScan, initial_global_scan_wait)
+                    .await;
+                if !initial_global_wait_uuids.is_empty() {
+                    log::info!(
+                        "Checking readiness for {} initial global file-based MCP server(s)",
+                        initial_global_wait_uuids.len()
+                    );
+                    setup_events
+                        .record_result(SetupStep::InitialGlobalMcpReadiness, async {
+                            foreground
+                                .spawn(move |me, ctx| {
+                                    me.wait_for_file_based_mcps_running(
+                                        initial_global_wait_uuids,
+                                        ctx,
+                                    )
+                                })
+                                .await?
+                                .await;
+                            Ok::<(), AgentDriverError>(())
+                        })
+                        .await?;
+                }
+
                 let status_rx = foreground
                     .spawn(move |me, ctx| me.execute_run(task.prompt, ctx))
                     .await?;
