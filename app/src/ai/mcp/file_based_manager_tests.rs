@@ -14,9 +14,7 @@ use super::{
     CloudEnvMcpScanServer, FileBasedMCPManager, FileBasedMCPManagerEvent, FileBasedMCPServerScope,
     MCPProvider,
 };
-use crate::ai::mcp::file_mcp_watcher::{
-    FileMCPConfigDiagnostic, FileMCPConfigDiagnosticKind, FileMCPScanOrigin,
-};
+use crate::ai::mcp::file_mcp_watcher::{FileMCPConfigDiagnostic, FileMCPConfigDiagnosticKind};
 use crate::ai::mcp::{FileMCPWatcher, FileMCPWatcherEvent, ParsedTemplatableMCPServerResult};
 use crate::auth::AuthStateProvider;
 use crate::settings::{AISettings, FocusedTerminalInfo};
@@ -246,7 +244,6 @@ fn all_config_diagnostics_are_owned_sorted_and_cleared_independently() {
                     root_path: first_root,
                     provider: MCPProvider::Claude,
                     servers: Vec::new(),
-                    scan_origin: FileMCPScanOrigin::Other,
                 },
                 ctx,
             );
@@ -913,9 +910,8 @@ fn test_update_file_based_servers_removes_server_only_when_no_refs() {
 }
 
 /// Before the watcher's completion event arrives, `initial_global_scan_result` must report
-/// `Pending` (i.e. `None`), and it must only ever accumulate UUIDs from `ConfigParsed` events
-/// explicitly tagged as part of the initial global scan — not from an ordinary project or
-/// cloud-environment scan.
+/// `Pending` (i.e. `None`), and the frozen wait set must only include UUIDs auto-started
+/// from a global-scoped parse — not from an ordinary project or cloud-environment scan.
 #[test]
 fn initial_global_scan_result_pending_until_watcher_signals_completion() {
     let _flag_guard = FeatureFlag::FileBasedMcp.override_enabled(true);
@@ -940,26 +936,25 @@ fn initial_global_scan_result_pending_until_watcher_signals_completion() {
         });
 
         manager.update(&mut app, |m, ctx| {
-            // Tagged as the initial global scan: contributes its auto-started UUID.
+            // Global Warp parse: contributes its auto-started UUID when the scan later
+            // freezes.
             m.handle_watcher_event(
                 &FileMCPWatcherEvent::ConfigParsed {
                     config_path: global_root.join(".mcp.json"),
                     root_path: global_root.clone(),
                     provider: MCPProvider::Warp,
                     servers: global_parsed,
-                    scan_origin: FileMCPScanOrigin::InitialGlobal,
                 },
                 ctx,
             );
-            // An ordinary (non-initial) project scan: even though project-scoped servers
-            // never auto-start, this also must not be counted toward the initial scan.
+            // A project-scoped parse: even though these servers never auto-start, this
+            // also must not be counted toward the initial scan.
             m.handle_watcher_event(
                 &FileMCPWatcherEvent::ConfigParsed {
                     config_path: project_root.join(".warp/.mcp.json"),
                     root_path: project_root.clone(),
                     provider: MCPProvider::Warp,
                     servers: project_parsed,
-                    scan_origin: FileMCPScanOrigin::Other,
                 },
                 ctx,
             );
@@ -991,7 +986,7 @@ fn initial_global_scan_result_pending_until_watcher_signals_completion() {
             assert_eq!(
                 m.initial_global_scan_result(),
                 Some(vec![spawned_uuid]),
-                "only the initial-global-tagged auto-started UUID should be in the wait set"
+                "only the global-scoped auto-started UUID should be in the wait set"
             );
         });
     });

@@ -9,9 +9,9 @@ use settings::SettingsMode;
 use warpui::App;
 
 use super::{
-    FileMCPConfigDiagnosticKind, FileMCPConfigParseOutcome, FileMCPScanOrigin, FileMCPWatcher,
-    FileMCPWatcherEvent, InFlightParse, config_change_flags, home_subdir_to_watch,
-    parse_mcp_config_file, providers_in_scope, should_watch_repository, substitute_env_vars,
+    FileMCPConfigDiagnosticKind, FileMCPConfigParseOutcome, FileMCPWatcher, FileMCPWatcherEvent,
+    InFlightParse, config_change_flags, home_subdir_to_watch, parse_mcp_config_file,
+    providers_in_scope, should_watch_repository, substitute_env_vars,
 };
 use crate::ai::mcp::MCPProvider;
 use crate::test_util::terminal::initialize_app_for_terminal_view;
@@ -549,27 +549,26 @@ fn stale_completion_callback_cannot_reclaim_a_superseded_source() {
     });
 }
 
-/// Subscribes to `FileMCPWatcher` and returns a future that resolves with the `scan_origin` of
-/// the first `ConfigParsed` event observed for `provider`.
-fn watch_config_parsed_scan_origin(
+/// Subscribes to `FileMCPWatcher` and returns a future that resolves when the first
+/// `ConfigParsed` event for `provider` is observed.
+fn watch_first_config_parsed(
     app: &mut App,
     watcher: &warpui::ModelHandle<FileMCPWatcher>,
     provider: MCPProvider,
-) -> futures::channel::oneshot::Receiver<FileMCPScanOrigin> {
-    let (tx, rx) = futures::channel::oneshot::channel::<FileMCPScanOrigin>();
+) -> futures::channel::oneshot::Receiver<()> {
+    let (tx, rx) = futures::channel::oneshot::channel();
     let mut tx = Some(tx);
     let collector = app.add_model(|_| WatcherEventCollector);
     collector.update(app, |_, ctx| {
         ctx.subscribe_to_model(watcher, move |_, _, event, _| {
             if let FileMCPWatcherEvent::ConfigParsed {
                 provider: event_provider,
-                scan_origin,
                 ..
             } = event
                 && *event_provider == provider
                 && let Some(sender) = tx.take()
             {
-                let _ = sender.send(*scan_origin);
+                let _ = sender.send(());
             }
         });
     });
@@ -604,7 +603,7 @@ fn registration_failure_settles_stranded_subdir_provider_directly() {
     App::test((), |mut app| async move {
         let watcher = setup_watcher_with_pending(&mut app, pending);
         let rx = watch_initial_global_scan_completions(&mut app, &watcher, 1);
-        let parsed_rx = watch_config_parsed_scan_origin(&mut app, &watcher, MCPProvider::Codex);
+        let parsed_rx = watch_first_config_parsed(&mut app, &watcher, MCPProvider::Codex);
 
         watcher.update(&mut app, |watcher, ctx| {
             watcher.settle_stranded_subdir_configs(&codex_dir, home_dir.clone(), ctx);
@@ -612,15 +611,9 @@ fn registration_failure_settles_stranded_subdir_provider_directly() {
 
         rx.await
             .expect("the direct parse from the failure handler must settle the initial scan");
-        let scan_origin = parsed_rx
+        parsed_rx
             .await
-            .expect("the direct parse for Codex should have been observed");
-        assert_eq!(
-            scan_origin,
-            FileMCPScanOrigin::InitialGlobal,
-            "the stranded source's direct parse must still be attributed to the initial \
-             global scan"
-        );
+            .expect("the stranded source's direct parse must still emit ConfigParsed");
     });
 }
 
@@ -664,8 +657,7 @@ fn settle_stranded_subdir_configs_skips_an_already_settled_source() {
 
         // A second `ConfigParsed` for this source after settlement would mean the fallback
         // re-read it.
-        let second_parse_rx =
-            watch_config_parsed_scan_origin(&mut app, &watcher, MCPProvider::Codex);
+        let second_parse_rx = watch_first_config_parsed(&mut app, &watcher, MCPProvider::Codex);
 
         // The registration-failure fallback runs anyway (e.g. the async failure was reported
         // after the scan already settled the source); it must be a no-op now.
@@ -726,19 +718,13 @@ fn initial_global_scan_awaits_existing_subdir_provider_via_watcher() {
         });
 
         let rx = watch_initial_global_scan_completions(&mut app, &watcher, 1);
-        let parsed_rx = watch_config_parsed_scan_origin(&mut app, &watcher, MCPProvider::Codex);
+        let parsed_rx = watch_first_config_parsed(&mut app, &watcher, MCPProvider::Codex);
 
         rx.await
             .expect("the watcher-delivered read must still settle the initial scan");
-        let scan_origin = parsed_rx
+        parsed_rx
             .await
             .expect("the watcher-delivered ConfigParsed for Codex should have been observed");
-        assert_eq!(
-            scan_origin,
-            FileMCPScanOrigin::InitialGlobal,
-            "the watcher-delivered ConfigParsed for an existing subdir provider must be \
-             attributed to the initial global scan, not treated as an ordinary update"
-        );
     });
 
     match old_home {

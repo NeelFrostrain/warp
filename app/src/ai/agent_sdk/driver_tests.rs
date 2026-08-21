@@ -47,7 +47,6 @@ use crate::ai::ambient_agents::AmbientAgentTaskId;
 use crate::ai::cloud_environments::{GithubRepo, SourceRepo};
 use crate::ai::mcp::builtin::{FACTORY_MCP_INSTALLATION_UUID, FACTORY_MCP_SERVER_NAME};
 use crate::ai::mcp::file_based_manager::FileBasedMCPManager;
-use crate::ai::mcp::file_mcp_watcher::FileMCPScanOrigin;
 use crate::ai::mcp::parsing::normalize_mcp_json;
 use crate::ai::mcp::{
     FileMCPWatcher, FileMCPWatcherEvent, JSONTransportType, MCPProvider,
@@ -1861,7 +1860,6 @@ fn simulate_completed_initial_global_scan_with_one_server(
                 root_path: warp_mcp_config_path.root_path.clone(),
                 provider: MCPProvider::Warp,
                 servers: parsed,
-                scan_origin: FileMCPScanOrigin::InitialGlobal,
             },
             ctx,
         );
@@ -1895,7 +1893,6 @@ fn simulate_pending_initial_global_scan_with_one_server(
                 root_path: warp_mcp_config_path.root_path.clone(),
                 provider: MCPProvider::Warp,
                 servers: parsed,
-                scan_origin: FileMCPScanOrigin::InitialGlobal,
             },
             ctx,
         );
@@ -2332,7 +2329,6 @@ fn timed_out_wait_does_not_tear_down_a_later_waits_subscription() {
                     root_path,
                     provider: MCPProvider::Warp,
                     servers: parsed,
-                    scan_origin: FileMCPScanOrigin::Other,
                 },
                 ctx,
             );

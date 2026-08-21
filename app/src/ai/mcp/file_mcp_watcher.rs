@@ -119,18 +119,6 @@ impl RepositorySubscriber for FileMCPSubscriber {
     }
 }
 
-/// Identifies which logical scan produced a settled `FileMCPWatcherEvent::ConfigParsed`, so
-/// `FileBasedMCPManager` can distinguish a source that is part of the one-time initial global
-/// home-config scan from any later reconciliation (incremental home file updates, project
-/// repository scans, or cloud-environment repository scans).
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum FileMCPScanOrigin {
-    /// One of the exact global home-config sources scheduled once in `FileMCPWatcher::new`.
-    InitialGlobal,
-    /// Any other scan or reconciliation.
-    Other,
-}
-
 /// A single source's currently-scheduled parse. Generation-tagged so a completion callback
 /// can tell whether it is still current or was superseded by a newer parse scheduled for the
 /// same source: `AbortHandle::abort` only takes effect the next time the background future is
@@ -775,21 +763,11 @@ impl FileMCPWatcher {
                     return;
                 }
 
-                let scan_origin = if startup_cohort {
+                if startup_cohort {
                     me.initial_global_scan_pending.remove(&callback_key);
-                    FileMCPScanOrigin::InitialGlobal
-                } else {
-                    FileMCPScanOrigin::Other
-                };
+                }
                 let repo_path_for_countdown = root_path.clone();
-                emit_parse_outcome(
-                    outcome,
-                    callback_key.0.clone(),
-                    root_path,
-                    provider,
-                    scan_origin,
-                    ctx,
-                );
+                emit_parse_outcome(outcome, callback_key.0.clone(), root_path, provider, ctx);
                 if let Some(count) = me.cloud_env_pending.get_mut(&repo_path_for_countdown) {
                     *count = count.saturating_sub(1);
                     if *count == 0 {
@@ -916,7 +894,6 @@ fn emit_parse_outcome(
     config_path: PathBuf,
     root_path: PathBuf,
     provider: MCPProvider,
-    scan_origin: FileMCPScanOrigin,
     ctx: &mut ModelContext<FileMCPWatcher>,
 ) {
     match outcome {
@@ -930,7 +907,6 @@ fn emit_parse_outcome(
             root_path,
             provider,
             servers,
-            scan_origin,
         }),
         FileMCPConfigParseOutcome::Error(diagnostic) => {
             let _ = root_path;
@@ -1052,10 +1028,6 @@ pub enum FileMCPWatcherEvent {
         root_path: PathBuf,
         provider: MCPProvider,
         servers: Vec<ParsedTemplatableMCPServerResult>,
-        /// Whether this settlement is one of the exact sources scheduled during
-        /// `FileMCPWatcher::new`, so `FileBasedMCPManager` can scope its first-turn wait set
-        /// to only the initial global scan.
-        scan_origin: FileMCPScanOrigin,
     },
     /// A config file was deleted; all servers for `(root_path, provider)` should be removed.
     ConfigRemoved {

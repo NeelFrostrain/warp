@@ -9,7 +9,7 @@ use warp_core::features::FeatureFlag;
 use warp_util::local_or_remote_path::LocalOrRemotePath;
 use warpui::{AppContext, Entity, ModelContext, SingletonEntity};
 
-use super::file_mcp_watcher::{FileMCPConfigDiagnostic, FileMCPScanOrigin};
+use super::file_mcp_watcher::FileMCPConfigDiagnostic;
 use super::{FileMCPWatcher, FileMCPWatcherEvent, MCPProvider};
 use crate::ai::mcp::ParsedTemplatableMCPServerResult;
 use crate::ai::mcp::templatable_installation::TemplatableMCPServerInstallation;
@@ -26,7 +26,9 @@ pub struct FileBasedMCPManager {
     /// Reverse mapping: logical root path → provider → set of server hashes.
     file_based_servers_by_root: HashMap<PathBuf, HashMap<MCPProvider, HashSet<u64>>>,
     /// UUIDs that were actually auto-start requested while parsing each `(root, provider)`.
-    /// They are temporarily stored here and removed to emit FileBasedMCPManagerEvent::CloudEnvMcpScanComplete
+    /// Cloud-environment completion drains the matching root; the initial global scan
+    /// snapshots the global-scoped entries without removing them (those sources keep
+    /// receiving incremental updates for the rest of the session).
     pending_scan_auto_started_servers_by_root:
         HashMap<PathBuf, HashMap<MCPProvider, HashSet<Uuid>>>,
     /// Latest read or parse diagnostic for each config path.
@@ -43,10 +45,6 @@ pub struct FileBasedMCPManager {
     defer_global_warp_autostart: bool,
     /// Whether deferred global Warp servers may now be started.
     global_warp_servers_activated: bool,
-    /// UUIDs auto-start requested while applying `ConfigParsed` events tagged
-    /// `FileMCPScanOrigin::InitialGlobal`. Drained into `initial_global_scan_state` when
-    /// `FileMCPWatcherEvent::InitialGlobalMcpScanComplete` arrives.
-    pending_initial_global_wait_uuids: Vec<Uuid>,
     /// Readiness latch for the one-time initial global home-config scan. `AgentDriver`
     /// consults this instead of relying only on the transient completion event, since
     /// application model initialization can finish the scan well before the driver
@@ -94,7 +92,6 @@ impl FileBasedMCPManager {
             config_diagnostics_by_path: Default::default(),
             defer_global_warp_autostart,
             global_warp_servers_activated: !defer_global_warp_autostart,
-            pending_initial_global_wait_uuids: Default::default(),
             initial_global_scan_state,
         }
     }
@@ -115,7 +112,6 @@ impl FileBasedMCPManager {
                 root_path,
                 provider,
                 servers,
-                scan_origin,
             } => {
                 if self
                     .config_diagnostics_by_path
@@ -124,12 +120,7 @@ impl FileBasedMCPManager {
                 {
                     ctx.emit(FileBasedMCPManagerEvent::ConfigDiagnosticChanged);
                 }
-                let auto_started_uuids =
-                    self.apply_parsed_servers(root_path.clone(), *provider, servers.clone(), ctx);
-                if *scan_origin == FileMCPScanOrigin::InitialGlobal {
-                    self.pending_initial_global_wait_uuids
-                        .extend(auto_started_uuids);
-                }
+                self.apply_parsed_servers(root_path.clone(), *provider, servers.clone(), ctx);
             }
             FileMCPWatcherEvent::ConfigRemoved {
                 config_path,
@@ -159,10 +150,9 @@ impl FileBasedMCPManager {
         }
     }
 
-    /// Freezes the first-turn wait set for the initial global home-config scan, draining
-    /// whatever UUIDs were accumulated while applying `FileMCPScanOrigin::InitialGlobal`
-    /// parses. Idempotent: a second call (which should not happen, since the watcher emits
-    /// its completion event exactly once) is a no-op rather than clobbering the frozen set.
+    /// Freezes the first-turn wait set by snapshotting auto-start UUIDs already
+    /// recorded for global-scoped `(root, provider)` entries. Idempotent: a second
+    /// call is a no-op rather than clobbering the frozen set.
     fn complete_initial_global_scan(&mut self, ctx: &mut ModelContext<Self>) {
         if matches!(
             self.initial_global_scan_state,
@@ -170,12 +160,21 @@ impl FileBasedMCPManager {
         ) {
             return;
         }
-        let wait_server_uuids: Vec<Uuid> =
-            std::mem::take(&mut self.pending_initial_global_wait_uuids)
-                .into_iter()
-                .unique()
-                .sorted_by_key(|uuid| uuid.to_string())
-                .collect();
+        let wait_server_uuids: Vec<Uuid> = self
+            .pending_scan_auto_started_servers_by_root
+            .iter()
+            .flat_map(|(root_path, provider_map)| {
+                provider_map.iter().filter_map(|(provider, uuids)| {
+                    (Self::scope_for_source(root_path, *provider)
+                        == FileBasedMCPServerScope::Global)
+                        .then_some(uuids)
+                })
+            })
+            .flatten()
+            .copied()
+            .unique()
+            .sorted_by_key(|uuid| uuid.to_string())
+            .collect();
         log::info!(
             "Initial global file-based MCP scan complete: {} auto-started server(s) to await before the first turn",
             wait_server_uuids.len()
@@ -289,8 +288,8 @@ impl FileBasedMCPManager {
 
     /// Applies a parsed list of MCP servers, spawning new servers and removing servers that
     /// are no longer present. Returns the UUIDs that were actually auto-start requested as a
-    /// result, so callers (e.g. [`Self::handle_watcher_event`]) can scope a wait set to a
-    /// specific scan.
+    /// result; those UUIDs are also recorded in `pending_scan_auto_started_servers_by_root`
+    /// so a later scan-complete event can freeze a wait set from them.
     fn apply_parsed_servers(
         &mut self,
         root_path: PathBuf,
