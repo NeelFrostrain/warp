@@ -286,6 +286,10 @@ pub(crate) fn build_deferred_repos_instruction(
     let entries = sorted_deferred.iter().map(|repo| {
         let forge = repo.code_forge.unwrap_or_default();
         let clone_url = repo.https_clone_url();
+        // The URL is built from server-supplied owner/repo identifiers, which are not
+        // guaranteed to be shell-safe; quote it exactly like the clone target so a
+        // metacharacter in either cannot split or extend the generated command.
+        let quoted_clone_url = shell_quote_arg(&clone_url, ShellType::Bash);
         let identity = format!("{forge} {}/{}", repo.owner, repo.repo);
         if let Some(conflicting) = target_name_conflict(repo, eager_repos, &sorted_deferred) {
             let placeholder = working_dir.join("<unused-target>").to_string_lossy().into_owned();
@@ -293,7 +297,7 @@ pub(crate) fn build_deferred_repos_instruction(
             format!(
                 "- {identity}\n  Clone URL: {clone_url}\n  Target conflict: {conflicting} already uses '{}' as its target. \
                  Choose an explicit, unused target path before cloning:\n  \
-                 test ! -e {quoted_placeholder} && git clone --filter=tree:0 {clone_url} {quoted_placeholder}",
+                 test ! -e {quoted_placeholder} && git clone --filter=tree:0 {quoted_clone_url} {quoted_placeholder}",
                 repo.repo
             )
         } else {
@@ -301,7 +305,7 @@ pub(crate) fn build_deferred_repos_instruction(
             let quoted_target = shell_quote_arg(&target, ShellType::Bash);
             format!(
                 "- {identity}\n  Clone URL: {clone_url}\n  Preferred target: {target}\n  \
-                 test ! -e {quoted_target} && git clone --filter=tree:0 {clone_url} {quoted_target}",
+                 test ! -e {quoted_target} && git clone --filter=tree:0 {quoted_clone_url} {quoted_target}",
             )
         }
     });

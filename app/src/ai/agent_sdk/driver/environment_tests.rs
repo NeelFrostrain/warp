@@ -14,6 +14,7 @@ use super::{
     single_repo_name, validate_repository_head_overrides,
 };
 use crate::ai::cloud_environments::{AmbientAgentEnvironment, SourceRepo};
+use crate::terminal::model::session::command_executor::shell_quote_arg;
 use crate::terminal::shell::ShellType;
 
 fn commit_head_override(
@@ -329,6 +330,37 @@ fn deferred_instruction_every_command_guards_target_existence() {
 }
 
 #[test]
+fn deferred_instruction_quotes_a_shell_metacharacter_bearing_clone_url() {
+    // `owner`/`repo` (and therefore the clone URL built from them) come from
+    // server-supplied repository identifiers and must not be trusted as
+    // shell-safe. A metacharacter-bearing owner must not let the generated
+    // command execute anything beyond the intended `git clone`.
+    let malicious = repo(CodeForge::GitHub, "acme'; touch pwned #", "billing");
+    let clone_url = malicious.https_clone_url();
+    let deferred = vec![malicious];
+    let instruction =
+        build_deferred_repos_instruction(&test_working_dir(), &[], &deferred).unwrap();
+
+    // The fixture must actually contain a shell metacharacter, or this test would pass
+    // vacuously.
+    assert_ne!(
+        shell_quote_arg(&clone_url, ShellType::Bash),
+        format!("'{clone_url}'")
+    );
+    assert!(
+        !instruction.contains(&format!("git clone --filter=tree:0 '{clone_url}'")),
+        "the clone URL must never reach `git clone` unescaped: {instruction}"
+    );
+    assert!(
+        instruction.contains(&format!(
+            "git clone --filter=tree:0 {}",
+            shell_quote_arg(&clone_url, ShellType::Bash)
+        )),
+        "the clone URL must be quoted the same way as the clone target: {instruction}"
+    );
+}
+
+#[test]
 fn deferred_instruction_never_contains_secret_bearing_content() {
     // The instruction legitimately warns about tokens in prose (e.g. "never put an
     // access token in a..."); what must never appear is an actual credential value, a
@@ -343,6 +375,9 @@ fn deferred_instruction_never_contains_secret_bearing_content() {
         "must not contain a user:pass@ URL: {instruction}"
     );
     for url in instruction.split_whitespace().filter(|s| s.contains("://")) {
+        // The `git clone` argument is shell-quoted (see the metacharacter test above), so
+        // strip any surrounding quote before checking its shape.
+        let url = url.trim_matches('\'');
         assert!(
             url.starts_with("https://github.com/") || url.starts_with("https://gitlab.com/"),
             "unexpected URL shape (must be a plain forge HTTPS clone URL): {url}"
