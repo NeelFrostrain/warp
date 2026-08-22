@@ -691,7 +691,7 @@ fn inject_deferred_repos_instruction(prompt: &mut AgentRunPrompt, instruction: S
                 None => ParsedSkill {
                     path: LocalOrRemotePath::Local(PathBuf::from("deferred-repositories")),
                     name: "deferred-repositories".to_string(),
-                    description: "Repositories attached to this Factory that are not cloned yet."
+                    description: "Instructions for dealing with repositories attached to this factory that are not cloned yet."
                         .to_string(),
                     content: instruction,
                     line_range: None,
