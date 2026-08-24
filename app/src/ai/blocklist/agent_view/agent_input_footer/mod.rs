@@ -2448,42 +2448,55 @@ impl View for AgentInputFooter {
                 .with_child(ChildView::new(&self.handoff_environment_selector).finish());
         }
 
-        let terminal_model = self.terminal_model.lock();
-        let shared_status = terminal_model.shared_session_status();
-        let is_cloud_context = super::is_in_cloud_context(&terminal_model);
-        let is_conversation_transcript_context =
-            is_conversation_transcript_context(self.terminal_view_id, &terminal_model, app);
+        // Extract everything we need from the terminal model up front and drop the lock before
+        // calling into `render_toolbar_item`, whose `UsageSummary` branch calls
+        // `menu_positioning_provider.menu_position()`, which re-locks the same terminal model
+        // (via `TerminalView`) and would deadlock since the lock is non-reentrant. Mirrors the
+        // same precaution already taken in `render_cli_mode_footer`.
+        let (shared_status, is_cloud_context, is_conversation_transcript_context) = {
+            let terminal_model = self.terminal_model.lock();
+            let shared_status = terminal_model.shared_session_status().clone();
+            let is_cloud_context = super::is_in_cloud_context(&terminal_model);
+            let is_conversation_transcript_context =
+                is_conversation_transcript_context(self.terminal_view_id, &terminal_model, app);
 
-        // Indicate whether the next follow-up continues on the live remote VM or starts a new one.
-        // The new-cloud-VM chip uses a yellow icon; the live-session chip uses the default color.
-        match resolve_ai_query_routing(
-            self.terminal_view_id,
-            self.ambient_agent_view_model.as_ref(),
-            &terminal_model,
-            app,
-        ) {
-            AIQueryRouting::LiveRemoteVm {
-                ambient_agent_task_id: Some(_),
-                ..
-            } => {
-                left_buttons.add_child(ChildView::new(&self.live_session_indicator).finish());
+            // Indicate whether the next follow-up continues on the live remote VM or starts a new one.
+            // The new-cloud-VM chip uses a yellow icon; the live-session chip uses the default color.
+            match resolve_ai_query_routing(
+                self.terminal_view_id,
+                self.ambient_agent_view_model.as_ref(),
+                &terminal_model,
+                app,
+            ) {
+                AIQueryRouting::LiveRemoteVm {
+                    ambient_agent_task_id: Some(_),
+                    ..
+                } => {
+                    left_buttons.add_child(ChildView::new(&self.live_session_indicator).finish());
+                }
+                AIQueryRouting::NewCloudVm { .. } => {
+                    left_buttons.add_child(ChildView::new(&self.new_cloud_vm_indicator).finish());
+                }
+                // Shared *local* session viewers (no ambient task) and non-live panes show no indicator.
+                AIQueryRouting::LiveRemoteVm {
+                    ambient_agent_task_id: None,
+                    ..
+                }
+                | AIQueryRouting::UnconnectedReadOnly
+                | AIQueryRouting::Local => {}
             }
-            AIQueryRouting::NewCloudVm { .. } => {
-                left_buttons.add_child(ChildView::new(&self.new_cloud_vm_indicator).finish());
-            }
-            // Shared *local* session viewers (no ambient task) and non-live panes show no indicator.
-            AIQueryRouting::LiveRemoteVm {
-                ambient_agent_task_id: None,
-                ..
-            }
-            | AIQueryRouting::UnconnectedReadOnly
-            | AIQueryRouting::Local => {}
-        }
+
+            (
+                shared_status,
+                is_cloud_context,
+                is_conversation_transcript_context,
+            )
+        };
 
         for item in &left_items {
             if let Some(element) = self.render_toolbar_item(
                 item,
-                shared_status,
+                &shared_status,
                 is_cloud_context,
                 is_conversation_transcript_context,
                 app,
@@ -2510,7 +2523,7 @@ impl View for AgentInputFooter {
             for item in &right_items {
                 if let Some(element) = self.render_toolbar_item(
                     item,
-                    shared_status,
+                    &shared_status,
                     is_cloud_context,
                     is_conversation_transcript_context,
                     app,

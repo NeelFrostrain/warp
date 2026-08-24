@@ -9,9 +9,10 @@
 //! palette, so the bars visually read as data-visualization chart segments
 //! rather than terminal-themed content.
 
-use pathfinder_color::ColorU;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
+
+use pathfinder_color::ColorU;
 
 use crate::persistence::model::ContextWindowSegmentType;
 
