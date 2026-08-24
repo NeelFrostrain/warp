@@ -52,6 +52,7 @@ pub(crate) use self::environment_selector::{
     EnvironmentSelector, EnvironmentSelectorEvent, EnvironmentSelectorTarget,
 };
 use crate::ai::AIRequestUsageModel;
+use crate::ai::agent::conversation::AIConversationId;
 use crate::ai::blocklist::BlocklistAIInputModel;
 use crate::ai::blocklist::agent_view::is_in_cloud_context;
 use crate::ai::blocklist::history_model::{BlocklistAIHistoryEvent, BlocklistAIHistoryModel};
@@ -273,10 +274,13 @@ pub struct AgentInputFooter {
     /// Used to anchor the usage popover above or below the input box, matching the
     /// surrounding menu positioning.
     menu_positioning_provider: Arc<dyn MenuPositioningProvider>,
-    /// The "Conversation" usage popover (Surfaces 2/4/6). `None` until first opened; a
-    /// fresh instance is created each time it opens so its section-collapse state resets
-    /// to the default on reopen (per the pricing-transparency spec's resolved decisions).
-    usage_popover: Option<ViewHandle<UsagePopoverView>>,
+    /// The "Conversation" usage popover (Surfaces 2/4/6). A single long-lived instance,
+    /// constructed up front like the other footer views (e.g. `agent_todos_popup`);
+    /// `UsagePopoverAction::ToggleUsagePopover`'s handler resets it via
+    /// `UsagePopoverView::reset_for_conversation` on every open rather than constructing a
+    /// new view mid-click-dispatch, so its section-collapse state still resets to the
+    /// default on reopen (per the pricing-transparency spec's resolved decisions).
+    usage_popover: ViewHandle<UsagePopoverView>,
     usage_popover_open: bool,
 }
 
@@ -714,6 +718,13 @@ impl AgentInputFooter {
                 })
         });
 
+        // Constructed up front (mirroring `agent_todos_popup`) rather than lazily inside the
+        // `ToggleUsagePopover` action handler: creating a new view mid-click-dispatch caused a
+        // hang. The placeholder conversation id is replaced via `reset_for_conversation` each
+        // time the popover opens; until then it simply renders empty (no matching conversation).
+        let usage_popover =
+            ctx.add_typed_action_view(|_ctx| UsagePopoverView::new(AIConversationId::new()));
+
         // Non-interactive cloud follow-up indicators. Only one is rendered at a time, chosen by
         // `AIQueryRouting` at render time.
         let live_session_indicator = ctx.add_typed_action_view(|_ctx| {
@@ -974,7 +985,7 @@ impl AgentInputFooter {
             prompt_cache_expiry_timer_handle: None,
             prompt_cache_expired: false,
             menu_positioning_provider: menu_positioning_provider.clone(),
-            usage_popover: None,
+            usage_popover,
             usage_popover_open: false,
         };
         me.sync_fast_forward_button(ctx);
@@ -2299,9 +2310,7 @@ impl AgentInputFooter {
                 )
                 .finish();
                 let mut stack = Stack::new().with_child(button);
-                if self.usage_popover_open
-                    && let Some(usage_popover) = self.usage_popover.as_ref()
-                {
+                if self.usage_popover_open {
                     let positioning = match self.menu_positioning_provider.menu_position(app) {
                         MenuPositioning::BelowInputBox => {
                             OffsetPositioning::offset_from_save_position_element(
@@ -2323,7 +2332,7 @@ impl AgentInputFooter {
                         }
                     };
                     stack.add_positioned_overlay_child(
-                        ChildView::new(usage_popover).finish(),
+                        ChildView::new(&self.usage_popover).finish(),
                         positioning,
                     );
                 }
@@ -2771,19 +2780,22 @@ impl TypedActionView for AgentInputFooter {
             AgentInputFooterAction::ToggleUsagePopover => {
                 self.usage_popover_open = !self.usage_popover_open;
                 if self.usage_popover_open {
-                    // A fresh instance is created on every open so the popover's
-                    // section-collapse state always resets to its default (see
-                    // `UsagePopoverView`'s doc comment).
-                    if let Some(conversation) = BlocklistAIHistoryModel::as_ref(ctx)
+                    // Look up the conversation id with a tightly scoped borrow (resolved to a
+                    // plain `Copy` id before touching `self`/`ctx` again) rather than a new
+                    // view. Constructing a new view here via `ctx.add_typed_action_view`
+                    // previously hung the app: this handler runs while `self` is temporarily
+                    // removed from the view tree by the dispatch machinery, and the button's
+                    // click is still being processed higher up the call stack.
+                    let conversation_id = BlocklistAIHistoryModel::as_ref(ctx)
                         .active_conversation(self.terminal_view_id)
-                    {
-                        let conversation_id = conversation.id();
-                        self.usage_popover =
-                            Some(ctx.add_typed_action_view(|_ctx| {
-                                UsagePopoverView::new(conversation_id)
-                            }));
-                    } else {
-                        self.usage_popover_open = false;
+                        .map(|conversation| conversation.id());
+                    match conversation_id {
+                        Some(conversation_id) => {
+                            self.usage_popover.update(ctx, |popover, _ctx| {
+                                popover.reset_for_conversation(conversation_id);
+                            });
+                        }
+                        None => self.usage_popover_open = false,
                     }
                 }
                 ctx.notify();

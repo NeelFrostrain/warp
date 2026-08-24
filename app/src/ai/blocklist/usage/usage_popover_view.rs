@@ -88,10 +88,11 @@ fn space_between_row() -> Flex {
 
 /// Floating "Conversation" usage popover. Holds only section-expand UI
 /// state; all usage data is read live from [`BlocklistAIHistoryModel`] at
-/// render time. A fresh instance is created each time the popover opens
-/// (see the footer wiring), so section-collapse state always resets to its
-/// default on reopen per the spec's resolved decisions — no state needs to
-/// be manually reset here.
+/// render time. The footer owns a single long-lived instance and calls
+/// [`Self::reset_for_conversation`] each time the popover opens (see the
+/// footer wiring), so section-collapse state always resets to its default
+/// on reopen per the spec's resolved decisions, without ever constructing a
+/// new view mid-click-dispatch.
 pub struct UsagePopoverView {
     conversation_id: AIConversationId,
     model_usage_section_expanded: bool,
@@ -129,6 +130,15 @@ impl UsagePopoverView {
             show_fewer_mouse_state: MouseStateHandle::default(),
             view_account_usage_mouse_state: MouseStateHandle::default(),
         }
+    }
+
+    /// Points this (reused) popover at `conversation_id` and resets all
+    /// section-collapse/rollup-truncation state back to its default,
+    /// exactly matching what [`Self::new`] would produce. Called by the
+    /// footer each time the popover is opened, so reopening always starts
+    /// from a clean slate without allocating a new view.
+    pub fn reset_for_conversation(&mut self, conversation_id: AIConversationId) {
+        *self = Self::new(conversation_id);
     }
 
     fn render_header(&self, appearance: &Appearance) -> Box<dyn Element> {
