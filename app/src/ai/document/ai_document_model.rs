@@ -1007,6 +1007,9 @@ impl AIDocumentModel {
     }
 
     /// Create a new, unbound editor model with the given content.
+    ///
+    /// Layout is deferred until the editor is actually rendered: restoring a conversation
+    /// rehydrates every revision of every plan document, and most of them are never opened.
     fn create_editor_model(
         content: impl Into<String>,
         file_link_resolution_context: Option<FileLinkResolutionContext>,
@@ -1019,7 +1022,7 @@ impl AIDocumentModel {
             // Use the same rich text styles as notebooks for consistency
             let styles = rich_text_styles(appearance, font_settings);
 
-            let mut model = NotebooksEditorModel::new_unbound(styles, ctx);
+            let mut model = NotebooksEditorModel::new_unbound_lazy(styles, ctx);
             model.set_default_mermaid_display_mode(MarkdownDisplayMode::Rendered, ctx);
             model.set_file_link_resolution_context(file_link_resolution_context);
 

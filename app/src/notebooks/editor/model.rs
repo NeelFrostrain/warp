@@ -160,17 +160,28 @@ impl NotebooksEditorModel {
         rte_window_id: WindowId,
         ctx: &mut ModelContext<Self>,
     ) -> Self {
-        Self::new_internal(text_styles, Some(rte_window_id), ctx)
+        Self::new_internal(text_styles, Some(rte_window_id), false, ctx)
     }
 
     /// Create a model that is not yet bound to a window. The window id should be set later via `set_window_id`.
     pub fn new_unbound(text_styles: RichTextStyles, ctx: &mut ModelContext<Self>) -> Self {
-        Self::new_internal(text_styles, None, ctx)
+        Self::new_internal(text_styles, None, false, ctx)
+    }
+
+    /// Like [`Self::new_unbound`], but defers text layout until the editor's element is first
+    /// laid out.
+    ///
+    /// Font shaping a whole markdown document is expensive, and callers that rehydrate documents
+    /// in bulk (conversation restore replays every document revision) would otherwise pay it for
+    /// content that is never displayed.
+    pub fn new_unbound_lazy(text_styles: RichTextStyles, ctx: &mut ModelContext<Self>) -> Self {
+        Self::new_internal(text_styles, None, true, ctx)
     }
 
     fn new_internal(
         text_styles: RichTextStyles,
         rte_window_id: Option<WindowId>,
+        lazy_layout: bool,
         ctx: &mut ModelContext<Self>,
     ) -> Self {
         let content = ctx.add_model(|_| {
@@ -183,7 +194,8 @@ impl NotebooksEditorModel {
 
         let selection_model = ctx.add_model(|_ctx| BufferSelectionModel::new(content.clone()));
 
-        let render_state = ctx.add_model(|ctx| RenderState::new(text_styles, false, None, ctx));
+        let render_state =
+            ctx.add_model(|ctx| RenderState::new(text_styles, lazy_layout, None, ctx));
         ctx.subscribe_to_model(&render_state, Self::handle_render_model_event);
 
         let selection = ctx.add_model(|ctx| {
