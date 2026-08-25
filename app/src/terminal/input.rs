@@ -2186,9 +2186,7 @@ pub fn init(app: &mut AppContext) {
             WorkspaceAction::TriggerExternalCtrlTFileSearch,
         )
         .with_enabled(|| FeatureFlag::ShellWidgetHandoff.is_enabled())
-        .with_context_predicate(
-            id!("Input") & !id!("VoltronActive") & !id!("LongRunningCommand"),
-        )
+        .with_context_predicate(id!("Input") & !id!("VoltronActive") & !id!("LongRunningCommand"))
         .with_key_binding("ctrl-t"),
     ]);
 

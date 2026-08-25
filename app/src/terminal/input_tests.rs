@@ -1998,6 +1998,122 @@ fn queued_command_completion_preserves_draft() {
     });
 }
 
+/// Builds a `BlockType::User` completion for `command`, for use with
+/// `Input::handle_block_completed_event` in tests that don't care about the block's other
+/// (lazily-computed) fields.
+fn user_block_completed_for_test(command: &str) -> BlockType {
+    BlockType::User(UserBlockCompleted::new_for_test(
+        BlockIndex::zero(),
+        Arc::new(SerializedBlock::new_for_test(
+            command.as_bytes().to_vec(),
+            vec![],
+        )),
+        command.to_owned(),
+        command.to_owned(),
+        String::new(),
+        String::new(),
+        false,
+        None,
+        0,
+        0,
+    ))
+}
+
+/// Drives a completed ctrl-t handoff (see `Input::handle_block_completed_event`) directly,
+/// without going through the full trigger/selection flow: constructs the pending handoff with
+/// the given `original_buffer`/`cursor_offset`/`insertion`, then completes its block. Returns the
+/// resulting buffer text and the byte offset the cursor/selection ends up at.
+async fn splice_ctrl_t_handoff(
+    app: &mut App,
+    original_buffer: &str,
+    cursor_offset: usize,
+    insertion: Option<&str>,
+) -> (String, ByteOffset) {
+    let terminal = add_window_with_bootstrapped_terminal(app, None, None).await;
+    let input = terminal.read(app, |view, _| view.input().clone());
+    let block_id = BlockId::new();
+    input.update(app, |input, ctx| {
+        input.pending_ctrl_t_handoff = Some(PendingCtrlTHandoff {
+            session_id: SessionId::from(1),
+            token: "tok-1".to_string(),
+            original_buffer: original_buffer.to_string(),
+            cursor_offset: ByteOffset::from(cursor_offset),
+            insertion: insertion.map(str::to_string),
+            block_id: block_id.clone(),
+        });
+        input.deferred_remote_operations.latest_block_id = BlockId::new();
+        input.handle_block_completed_event(
+            BlockCompletedEvent {
+                block_type: user_block_completed_for_test(original_buffer),
+                num_secrets_obfuscated: 0,
+                block_index: BlockIndex::zero(),
+                block_id,
+                session_id: None,
+                restored_block_was_local: None,
+            },
+            ctx,
+        );
+    });
+    input.read(app, |input, ctx| {
+        (
+            input.buffer_text(ctx),
+            input
+                .editor()
+                .as_ref(ctx)
+                .end_byte_index_of_last_selection(ctx),
+        )
+    })
+}
+
+#[test]
+fn ctrl_t_handoff_splices_selection_in_middle_of_line() {
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        // Cursor sits right after "echo START ", before "END": the insertion must land there
+        // with both the preceding and following text preserved.
+        let (buffer, cursor) =
+            splice_ctrl_t_handoff(&mut app, "echo START END", 11, Some("FILE.txt ")).await;
+        assert_eq!(buffer, "echo START FILE.txt END");
+        assert_eq!(cursor, ByteOffset::from("echo START FILE.txt ".len()));
+    });
+}
+
+#[test]
+fn ctrl_t_handoff_splices_selection_at_end_of_line() {
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        let (buffer, cursor) = splice_ctrl_t_handoff(&mut app, "echo ", 5, Some("FILE.txt")).await;
+        assert_eq!(buffer, "echo FILE.txt");
+        assert_eq!(cursor, ByteOffset::from("echo FILE.txt".len()));
+    });
+}
+
+#[test]
+fn ctrl_t_handoff_splices_selection_into_empty_buffer() {
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        let (buffer, cursor) = splice_ctrl_t_handoff(&mut app, "", 0, Some("FILE.txt")).await;
+        assert_eq!(buffer, "FILE.txt");
+        assert_eq!(cursor, ByteOffset::from("FILE.txt".len()));
+    });
+}
+
+/// A cursor byte offset mistakenly treated as a char offset would panic or corrupt the buffer
+/// the moment a multi-byte character (here, "caf\u{e9}", where \u{e9} is 2 bytes in UTF-8)
+/// precedes the cursor.
+#[test]
+fn ctrl_t_handoff_splices_selection_after_multi_byte_character() {
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        let original = "caf\u{e9} ";
+        let cursor_offset = original.len();
+        let (buffer, cursor) =
+            splice_ctrl_t_handoff(&mut app, original, cursor_offset, Some("dest.txt")).await;
+        assert_eq!(buffer, "caf\u{e9} dest.txt");
+        assert_eq!(cursor, ByteOffset::from("caf\u{e9} dest.txt".len()));
+    });
+}
+
 /// Verifies deleting a queued row does not overwrite an existing draft.
 #[test]
 fn row_deleted_event_preserves_existing_draft() {
