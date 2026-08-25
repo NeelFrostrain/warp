@@ -504,6 +504,80 @@ function warp_escape_json
     string join \n $argv | command sed -E 's/(["\\\\])/\\\\\\1/g; s/'\b'/\\\\b/g; s/'\t'/\\\\t/g; s/'\f'/\\\\f/g; s/'\r'/\\\\r/g; $!s/$/\\\\n/' | command tr -d '\n'
 end
 
+# Reports the widget `^R` is bound to, if the user has rebound it away from fish's own
+# history search. Returns non-zero when `^R` is still on a fish default.
+#
+# `bind` lists fish's own defaults with a `--preset` flag, so any binding without it is one
+# the user (or a plugin like fzf or atuin) installed. Detection is deliberately generic: we
+# report the widget name and let Warp decide what it knows how to do with it.
+function warp_external_ctrl_r_widget
+  # fish >= 4.0 renamed key specifications, so `bind` echoes back `ctrl-r` where earlier
+  # versions echo `\cr`. Both spellings are accepted as input by every supported version,
+  # so query with the older one and match either in the output.
+  set -l widget ""
+  for binding in (bind \cr 2>/dev/null)
+    if string match --quiet -- 'bind --preset *' "$binding"
+      continue
+    end
+    # Strip the leading `bind [-M <mode>] <key>`, leaving just the widget/command.
+    set widget (string replace --regex -- '^bind (-M \S+ +)?\S+ +' '' "$binding")
+  end
+  test -n "$widget"; or return 1
+  echo "$widget"
+end
+
+# Runs the shell's own ctrl-r history tool (fzf or atuin, per the widget name captured in
+# $_WARP_EXTERNAL_CTRL_R_WIDGET during bootstrap) as a synthetic foreground command, so Warp's
+# existing long-running-command machinery hides the input editor and forwards keystrokes to the
+# tool's PTY-driven UI. Reports the selected command (or an empty buffer, if cancelled) via the
+# ExternalCtrlRSelection hook so Warp can insert it into the input editor without executing it.
+# The handoff token given as $argv[1] is echoed back unchanged, so Warp can confirm the hook is
+# the reply to the handoff it started rather than an unrelated write to the pty.
+#
+# We re-run each tool's own underlying picker rather than invoking its bound fish function: those
+# functions write the selection into fish's line buffer with `commandline`, which would leave the
+# text queued for execution in the shell rather than handing it to Warp's editor.
+function warp_run_external_ctrl_r_widget
+  set -l warp_ctrl_r_token "$argv[1]"
+  set -l result ""
+  switch "$_WARP_EXTERNAL_CTRL_R_WIDGET"
+    case '*fzf*'
+      # fzf's fish integration reads history through the shell rather than a history file, so
+      # this mirrors the pipeline fzf-history-widget builds, minus its `commandline` calls.
+      set -lx FZF_DEFAULT_OPTS (__fzf_defaults '' \
+        '--nth=2..,.. --scheme=history --wrap-sign="\t↳ "' \
+        "--bind=ctrl-r:toggle-sort --highlight-line $FZF_CTRL_R_OPTS" \
+        '--accept-nth=2.. --read0 --print0 --with-shell='(status fish-path)\\ -c)
+      set -lx FZF_DEFAULT_OPTS_FILE
+      set -lx FZF_DEFAULT_COMMAND
+      if type -q perl
+        set -a FZF_DEFAULT_OPTS '--tac'
+        set FZF_DEFAULT_COMMAND 'builtin history -z --reverse | command perl -0 -pe \'s/^/$.\t/g; s/\n/\n\t/gm\''
+      else
+        set FZF_DEFAULT_COMMAND \
+          'set -l h (builtin history -z --reverse | string split0);' \
+          'for i in (seq (count $h) -1 1);' \
+          'string join0 -- $i\t(string replace -a -- \n \n\t $h[$i] | string collect);' \
+          'end'
+      end
+      test -z "$fish_private_mode"; and builtin history merge
+      set -l selected
+      if set selected (eval $FZF_DEFAULT_COMMAND \| (__fzfcmd) | string split0)
+        set result (string replace -a -- \n\t \n $selected[1])
+      end
+    case '*atuin*'
+      # atuin writes its TUI to stdout and the selection to fd 3, so the two are swapped here to
+      # leave the UI on the terminal and capture only the selection.
+      set -l output (ATUIN_SHELL_FISH=t ATUIN_LOG=error atuin search -i 3>&1 1>&2 2>&3 | string collect)
+      # atuin prefixes the selection with __atuin_accept__: when `enter_accept` is on and the
+      # user pressed enter. Warp always inserts without executing, so the prefix is dropped.
+      set result (string replace "__atuin_accept__:" "" -- "$output" | string collect)
+  end
+  set -l warp_escaped_selection (warp_escape_json "$result")
+  set -l warp_escaped_token (warp_escape_json "$warp_ctrl_r_token")
+  warp_send_json_message "{ \"hook\": \"ExternalCtrlRSelection\", \"value\": { \"buffer\": \"$warp_escaped_selection\", \"token\": \"$warp_escaped_token\", \"session_id\": $WARP_SESSION_ID } }"
+end
+
 function warp_bootstrapped
   set -l histfile_directory
   set histfile_directory "$XDG_DATA_HOME"
@@ -516,6 +590,15 @@ function warp_bootstrapped
   if [ "$fish_key_bindings" = "fish_vi_key_bindings" ]
       set vi_mode_enabled "1"
   end
+
+  # Tags for shell configurations Warp needs to know about, matching the `shell_plugins`
+  # list bash and zsh already report. Newline-separated, one tag per line.
+  set -l shell_plugins
+  set -g _WARP_EXTERNAL_CTRL_R_WIDGET (warp_external_ctrl_r_widget)
+  if test -n "$_WARP_EXTERNAL_CTRL_R_WIDGET"
+    set -a shell_plugins external_ctrl_r_history
+  end
+  set -l escaped_shell_plugins (warp_escape_json $shell_plugins)
 
   set -l kernel_name (uname)
   if test -n "$kernel_name"
@@ -546,7 +629,7 @@ function warp_bootstrapped
   # part of its builtins (e.g. "for", "while", etc.).
   set -l escaped_editor (warp_escape_json "$EDITOR")
   set -l escaped_shell_path (warp_escape_json (status fish-path))
-  set -l escaped_json "{\"hook\": \"Bootstrapped\", \"value\": {\"histfile\": \"$escaped_histfile\", \"session_id\": $WARP_SESSION_ID, \"shell\": \"fish\", \"home_dir\": \"$HOME\", \"path\": \"$PATH\", \"editor\": \"$escaped_editor\", \"abbreviations\": \"$escaped_abbr\", \"aliases\": \"$escaped_aliases\", \"function_names\": \"$function_names\", \"env_var_names\": \"$env_var_names\", \"builtins\": \"$escaped_builtins\", \"keywords\": \"\", \"shell_version\": \"$FISH_VERSION\", \"vi_mode_enabled\": \"$vi_mode_enabled\", \"os_category\": \"$os_category\", \"linux_distribution\": \"$linux_distribution\", \"wsl_name\": \"$WSL_DISTRO_NAME\", \"shell_path\": \"$escaped_shell_path\"}}"
+  set -l escaped_json "{\"hook\": \"Bootstrapped\", \"value\": {\"histfile\": \"$escaped_histfile\", \"session_id\": $WARP_SESSION_ID, \"shell\": \"fish\", \"home_dir\": \"$HOME\", \"path\": \"$PATH\", \"editor\": \"$escaped_editor\", \"abbreviations\": \"$escaped_abbr\", \"aliases\": \"$escaped_aliases\", \"function_names\": \"$function_names\", \"env_var_names\": \"$env_var_names\", \"builtins\": \"$escaped_builtins\", \"keywords\": \"\", \"shell_version\": \"$FISH_VERSION\", \"shell_plugins\": \"$escaped_shell_plugins\", \"vi_mode_enabled\": \"$vi_mode_enabled\", \"os_category\": \"$os_category\", \"linux_distribution\": \"$linux_distribution\", \"wsl_name\": \"$WSL_DISTRO_NAME\", \"shell_path\": \"$escaped_shell_path\"}}"
   warp_send_json_message $escaped_json
 end
 
