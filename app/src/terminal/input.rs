@@ -2185,6 +2185,7 @@ pub fn init(app: &mut AppContext) {
             "External File Search",
             WorkspaceAction::TriggerExternalCtrlTFileSearch,
         )
+        .with_enabled(|| FeatureFlag::ShellWidgetHandoff.is_enabled())
         .with_context_predicate(
             id!("Input") & !id!("VoltronActive") & !id!("LongRunningCommand"),
         )
