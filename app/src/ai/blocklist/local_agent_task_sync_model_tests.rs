@@ -598,7 +598,7 @@ fn install_model_with_constant_result(
     let cli_sessions_model = app.add_singleton_model(|_| CLIAgentSessionsModel::new());
     let mut mock = MockAIClient::new();
     mock.expect_update_agent_task()
-        .returning(move |_, _, _, _, _, _| {
+        .returning(move |_, _, _, _, _, _, _, _| {
             if succeed {
                 Ok(())
             } else {

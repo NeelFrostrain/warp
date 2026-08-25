@@ -2732,7 +2732,7 @@ impl AIClient for ServerApi {
     ) -> anyhow::Result<bool, anyhow::Error> {
         let variables = SetupFailureDebugAuthorizationVariables {
             input: SetupFailureDebugAuthorizationInput {
-                task_id: task_id.into(),
+                task_id: task_id.to_string().into(),
                 workload_token,
                 participant_firebase_uid,
             },
