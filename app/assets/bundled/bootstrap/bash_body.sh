@@ -847,6 +847,31 @@ if [ -z "$WARP_BOOTSTRAPPED" ]; then
         warp_send_json_message "{ \"hook\": \"ExternalCtrlRSelection\", \"value\": { \"buffer\": \"$warp_escaped_selection\", \"token\": \"$warp_escaped_token\", \"session_id\": $WARP_SESSION_ID } }"
     }
 
+    # Runs the shell's own ctrl-t file-search widget (fzf, per the function captured in
+    # $_WARP_EXTERNAL_CTRL_T_WIDGET during bootstrap) as a synthetic foreground command, mirroring
+    # warp_run_external_ctrl_r_widget above. Reports the selected path(s) (or an empty buffer, if
+    # cancelled) via the ExternalCtrlTSelection hook so Warp can insert them into the input editor
+    # at the cursor position, without executing anything. The handoff token given as $1 is echoed
+    # back unchanged, so Warp can confirm the hook is actually the reply to the handoff it started
+    # rather than an unrelated write to the pty.
+    warp_run_external_ctrl_t_widget () {
+        local warp_ctrl_t_token="$1"
+        local result=""
+        case "$_WARP_EXTERNAL_CTRL_T_WIDGET" in
+          fzf-file-widget)
+            # __fzf_select__ (installed by fzf's bash integration) runs the same find|fzf
+            # pipeline fzf-file-widget itself uses, honoring $FZF_CTRL_T_COMMAND/$FZF_CTRL_T_OPTS
+            # if the user set them, and echoes the space-escaped selection to stdout -- this is
+            # exactly what fzf-file-widget calls before splicing the result into READLINE_LINE at
+            # the cursor itself, which we don't want here since we land the selection ourselves.
+            result="$(__fzf_select__)"
+            ;;
+        esac
+        local warp_escaped_selection="$(warp_escape_json "$result")"
+        local warp_escaped_token="$(warp_escape_json "$warp_ctrl_t_token")"
+        warp_send_json_message "{ \"hook\": \"ExternalCtrlTSelection\", \"value\": { \"buffer\": \"$warp_escaped_selection\", \"token\": \"$warp_escaped_token\", \"session_id\": $WARP_SESSION_ID } }"
+    }
+
     # Check whether the prompt-related variables have OSC prompt marker sequences,
     # and if not, wrap them with the appropriate markers so that we can direct the
     # prompt bytes to the appropriate grids.
@@ -1288,14 +1313,16 @@ esac
     # HISTIGNORE value which may been set in an RC file sourced above. It is important to
     # ensure that this happens _after_ the user's RC files have been sourced.
     #
-    # This also excludes the ctrl-r external history handoff helper (see
-    # warp_run_external_ctrl_r_widget above): it's a Warp-internal invocation, not a command the
-    # user meant to run again later, and leaving it in history would otherwise pollute the very
-    # history list this feature searches on the next ctrl-r.
+    # This also excludes the ctrl-r/ctrl-t external handoff helpers (see
+    # warp_run_external_ctrl_r_widget/warp_run_external_ctrl_t_widget above): they're
+    # Warp-internal invocations, not commands the user meant to run again later, and leaving
+    # them in history would otherwise pollute the very history list ctrl-r searches (and, for
+    # the ctrl-t helper specifically, still show up as ordinary shell history noise even though
+    # ctrl-t itself doesn't search shell history).
     if [[ ! -z $HISTIGNORE ]]; then
-        HISTIGNORE="*warp_run_generator_command*:*warp_run_external_ctrl_r_widget*:$HISTIGNORE"
+        HISTIGNORE="*warp_run_generator_command*:*warp_run_external_ctrl_r_widget*:*warp_run_external_ctrl_t_widget*:$HISTIGNORE"
     else
-        HISTIGNORE="*warp_run_generator_command*:*warp_run_external_ctrl_r_widget*"
+        HISTIGNORE="*warp_run_generator_command*:*warp_run_external_ctrl_r_widget*:*warp_run_external_ctrl_t_widget*"
     fi
 
     # If the user has PROMPT_COMMAND set in their bootstrap scripts,
@@ -1451,6 +1478,22 @@ esac
         _WARP_EXTERNAL_CTRL_R_WIDGET="__atuin_history"
         shell_plugins+=(external_ctrl_r_history)
       fi
+
+      # Detect whether ctrl-t has been rebound to fzf's file-search widget, independent of
+      # whichever tool (if any) owns ctrl-r above -- a user may have one binding without the
+      # other. fzf binds ctrl-t directly via `bind -x` in every keymap (emacs, vi-insert, and
+      # vi-command all get their own `-x` binding to the same widget name), unlike alt-c, which
+      # has no `-x`-bindable form and instead uses a macro-chain trick to reach emacs mode's
+      # command substitution; that asymmetry is why ctrl-t doesn't need a flag-based fallback
+      # the way ctrl-r's newer-atuin case does. atuin has no ctrl-t equivalent.
+      _WARP_EXTERNAL_CTRL_T_WIDGET=""
+      warp_ctrl_t_binding="$(bind -X 2>/dev/null | command -p sed -n 's/^"\\C-t": "\(.*\)"$/\1/p')"
+      case "$warp_ctrl_t_binding" in
+        fzf-file-widget)
+          _WARP_EXTERNAL_CTRL_T_WIDGET="$warp_ctrl_t_binding"
+          shell_plugins+=(external_ctrl_t_file)
+          ;;
+      esac
     fi
 
     function warp_bootstrapped () {

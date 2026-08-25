@@ -719,6 +719,31 @@ if [[ -z $WARP_BOOTSTRAPPED ]]; then
     warp_send_json_message "{ \"hook\": \"ExternalCtrlRSelection\", \"value\": { \"buffer\": \"$warp_escaped_selection\", \"token\": \"$warp_escaped_token\", \"session_id\": $WARP_SESSION_ID } }"
   }
 
+  # Runs the shell's own ctrl-t file-search widget (fzf, per the widget name captured in
+  # $_WARP_EXTERNAL_CTRL_T_WIDGET during bootstrap) as a synthetic foreground command, mirroring
+  # warp_run_external_ctrl_r_widget above. Reports the selected path(s) (or an empty buffer, if
+  # cancelled) via the ExternalCtrlTSelection hook so Warp can insert them into the input editor
+  # at the cursor position, without executing anything. The handoff token given as $1 is echoed
+  # back unchanged, so Warp can confirm the hook is actually the reply to the handoff it started
+  # rather than an unrelated write to the pty.
+  function warp_run_external_ctrl_t_widget () {
+    local warp_ctrl_t_token="$1"
+    local result=""
+    case "$_WARP_EXTERNAL_CTRL_T_WIDGET" in
+      fzf-file-widget)
+        # __fzf_select (installed by fzf's zsh integration) runs the same find|fzf pipeline
+        # fzf-file-widget itself uses, honoring $FZF_CTRL_T_COMMAND/$FZF_CTRL_T_OPTS if the user
+        # set them, and echoes the shell-quoted selection to stdout -- this is exactly what
+        # fzf-file-widget calls before splicing the result into LBUFFER at the cursor itself,
+        # which we don't want here since we land the selection ourselves.
+        result="$(__fzf_select)"
+        ;;
+    esac
+    local warp_escaped_selection="$(warp_escape_json "$result")"
+    local warp_escaped_token="$(warp_escape_json "$warp_ctrl_t_token")"
+    warp_send_json_message "{ \"hook\": \"ExternalCtrlTSelection\", \"value\": { \"buffer\": \"$warp_escaped_selection\", \"token\": \"$warp_escaped_token\", \"session_id\": $WARP_SESSION_ID } }"
+  }
+
   function clear() {
       warp_send_json_message "{\"hook\": \"Clear\", \"value\": {\"session_id\": $WARP_SESSION_ID}}"
   }
@@ -1288,10 +1313,11 @@ esac
   # See https://zsh.sourceforge.io/Doc/Release/Functions.html for more context
   # on the zshaddhistory hook.
   _warp_zshaddhistory() {
-    # Also exclude the ctrl-r external history handoff helper (see
-    # warp_run_external_ctrl_r_widget above): it's a Warp-internal invocation, not a command
-    # the user meant to run again later.
-    _is_warp_generator_command "$1" && [[ "$1" != *"warp_run_external_ctrl_r_widget"* ]]
+    # Also exclude the ctrl-r/ctrl-t external handoff helpers (see
+    # warp_run_external_ctrl_r_widget/warp_run_external_ctrl_t_widget above): they're
+    # Warp-internal invocations, not commands the user meant to run again later.
+    _is_warp_generator_command "$1" && [[ "$1" != *"warp_run_external_ctrl_r_widget"* ]] && \
+      [[ "$1" != *"warp_run_external_ctrl_t_widget"* ]]
   }
 
   # Register this zshaddhistory hook after the user's RC files have been sourced,
@@ -1381,6 +1407,23 @@ esac
       fzf-history-widget|atuin-search|atuin-search-viins|atuin-search-vicmd|_atuin_search_widget)
         _WARP_EXTERNAL_CTRL_R_WIDGET="$warp_ctrl_r_widget"
         shell_plugins+=(external_ctrl_r_history)
+        ;;
+    esac
+  fi
+
+  # Detect whether ctrl-t has been rebound to fzf's file-search widget, independent of whichever
+  # tool (if any) owns ctrl-r above -- a user may have one binding without the other. fzf's zle
+  # widget name for ctrl-t is the same across shells ("fzf-file-widget"); atuin has no ctrl-t
+  # equivalent. See the ctrl-r detection above for why we match against an exact allowlist rather
+  # than a name containing "fzf".
+  _WARP_EXTERNAL_CTRL_T_WIDGET=""
+  warp_ctrl_t_binding="$(bindkey -M main '^T' 2>/dev/null)"
+  if [[ "$warp_ctrl_t_binding" == '"^T" '* ]]; then
+    warp_ctrl_t_widget="${warp_ctrl_t_binding#\"^T\" }"
+    case "$warp_ctrl_t_widget" in
+      fzf-file-widget)
+        _WARP_EXTERNAL_CTRL_T_WIDGET="$warp_ctrl_t_widget"
+        shell_plugins+=(external_ctrl_t_file)
         ;;
     esac
   fi
