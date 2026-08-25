@@ -75,6 +75,8 @@ fn per_agent_entry(name: &str, credits: f32) -> PerAgentCreditEntry {
         display_name: name.to_string(),
         avatar: AgentAvatar::Child,
         credits_spent: credits,
+        cost_in_cents: None,
+        tokens: None,
     }
 }
 
@@ -110,25 +112,42 @@ fn format_token_count_abbreviates_above_1000() {
 }
 
 #[test]
-fn format_tokens_with_cost_omits_dollar_suffix_when_flag_disabled() {
+fn format_tokens_and_cost_omits_dollar_suffix_when_flag_disabled() {
     let _flag = FeatureFlag::PricingTransparency.override_enabled(false);
 
-    assert_eq!(format_tokens_with_cost(9600, Some(36.0)), "9.6k tokens");
-}
-
-#[test]
-fn format_tokens_with_cost_appends_dollar_suffix_when_flag_enabled() {
-    let _flag = FeatureFlag::PricingTransparency.override_enabled(true);
-
     assert_eq!(
-        format_tokens_with_cost(9600, Some(36.0)),
-        "9.6k tokens ($0.36)"
+        format_tokens_and_cost(Some(9600), Some(36.0)),
+        "9.6k tokens"
     );
 }
 
 #[test]
-fn format_tokens_with_cost_omits_dollar_suffix_when_cost_is_unknown() {
+fn format_tokens_and_cost_joins_tokens_and_dollar_with_a_slash_when_flag_enabled() {
     let _flag = FeatureFlag::PricingTransparency.override_enabled(true);
 
-    assert_eq!(format_tokens_with_cost(9600, None), "9.6k tokens");
+    assert_eq!(
+        format_tokens_and_cost(Some(9600), Some(36.0)),
+        "9.6k tokens / $0.36"
+    );
+}
+
+#[test]
+fn format_tokens_and_cost_omits_dollar_suffix_when_cost_is_unknown() {
+    let _flag = FeatureFlag::PricingTransparency.override_enabled(true);
+
+    assert_eq!(format_tokens_and_cost(Some(9600), None), "9.6k tokens");
+}
+
+#[test]
+fn format_tokens_and_cost_falls_back_to_cost_only_when_tokens_are_unknown() {
+    let _flag = FeatureFlag::PricingTransparency.override_enabled(true);
+
+    assert_eq!(format_tokens_and_cost(None, Some(36.0)), "$0.36");
+}
+
+#[test]
+fn format_tokens_and_cost_shows_em_dash_when_both_are_unknown() {
+    let _flag = FeatureFlag::PricingTransparency.override_enabled(true);
+
+    assert_eq!(format_tokens_and_cost(None, None), "\u{2014}");
 }

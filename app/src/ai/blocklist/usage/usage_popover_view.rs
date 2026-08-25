@@ -31,8 +31,9 @@ use pathfinder_color::ColorU;
 use warp_core::ui::Icon;
 use warp_core::ui::theme::WarpTheme;
 use warpui::elements::{
-    Border, ConstrainedBox, Container, CornerRadius, CrossAxisAlignment, Empty, Expanded, Flex,
-    Hoverable, MainAxisAlignment, MainAxisSize, MouseStateHandle, ParentElement, Radius, Text,
+    Border, ConstrainedBox, Container, CornerRadius, CrossAxisAlignment, Dismiss, Empty, Expanded,
+    Flex, Hoverable, MainAxisAlignment, MainAxisSize, MouseStateHandle, ParentElement, Radius,
+    Text,
 };
 use warpui::platform::Cursor;
 use warpui::text_layout::ClipConfig;
@@ -47,7 +48,6 @@ use crate::ai::blocklist::usage::colors::color_for_model;
 use crate::ai::blocklist::usage::rollup::{
     AgentAvatar, OrchestrationCreditRollup, PerAgentCreditEntry, compute_orchestration_rollup,
 };
-use crate::ai::blocklist::view_util::{format_credits, format_credits_with_cost};
 use crate::appearance::Appearance;
 use crate::features::FeatureFlag;
 use crate::persistence::model::{
@@ -75,6 +75,16 @@ pub enum UsagePopoverAction {
     ToggleResponseTimeSection,
     ShowAllRollupAgents,
     ShowFewerRollupAgents,
+    /// Dispatched by the [`Dismiss`] underlay when the user clicks outside
+    /// the popover.
+    RequestClose,
+}
+
+/// Emitted when the popover should be closed, so the footer (which owns
+/// `usage_popover_open`) can react to an outside click.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum UsagePopoverEvent {
+    Close,
 }
 
 /// A `Flex::row` preconfigured for `label ... value` rows: cross-axis
@@ -155,7 +165,7 @@ impl UsagePopoverView {
         let title = Text::new(
             "Conversation".to_string(),
             appearance.ui_font_family(),
-            appearance.ui_font_size() + 2.,
+            appearance.ui_font_size() + 4.,
         )
         .with_color(blended_colors::text_main(theme, background))
         .finish();
@@ -185,7 +195,7 @@ impl UsagePopoverView {
 
     /// "Total Usage" summary row shown above the model/agent usage
     /// section, using the orchestration rollup total when one applies.
-    fn render_credits_summary_row(
+    fn render_total_usage_row(
         &self,
         conversation: &AIConversation,
         rollup: Option<&OrchestrationCreditRollup>,
@@ -195,25 +205,27 @@ impl UsagePopoverView {
         let background = theme.surface_2();
         let font_size = appearance.ui_font_size();
 
-        let total_credits = rollup
-            .map(|r| r.total_credits)
-            .unwrap_or_else(|| conversation.credits_spent());
-
-        // Total tokens across all models is only meaningful for the
-        // single-conversation case; the orchestration rollup only tracks
-        // credits per agent, so the parenthetical falls back to cost-only
-        // when a rollup applies.
-        let total_tokens: u32 = if rollup.is_some() {
-            0
-        } else {
-            conversation
-                .token_usage()
-                .iter()
-                .map(|model| model.warp_tokens + model.byok_tokens + model.custom_endpoint_tokens)
-                .sum()
+        let (total_tokens, cost_in_cents) = match rollup {
+            Some(rollup) => (
+                rollup.total_tokens.map(u64::from),
+                rollup.total_cost_in_cents,
+            ),
+            None => {
+                let total_tokens: u64 = conversation
+                    .token_usage()
+                    .iter()
+                    .map(|model| {
+                        (model.warp_tokens + model.byok_tokens + model.custom_endpoint_tokens)
+                            as u64
+                    })
+                    .sum();
+                (
+                    Some(total_tokens),
+                    conversation.usage_totals().cost_in_cents,
+                )
+            }
         };
-        let cost_in_cents = conversation.usage_totals().cost_in_cents;
-        let value_text = format_credits_with_cost(total_credits, Some(total_tokens), cost_in_cents);
+        let value_text = format_tokens_and_cost(total_tokens, cost_in_cents);
 
         space_between_row()
             .with_child(
@@ -251,7 +263,9 @@ impl UsagePopoverView {
         };
         let label = label.to_string();
         let overline_font_family = appearance.overline_font_family();
-        let overline_font_size = appearance.overline_font_size();
+        // A couple points larger than the raw overline size so the section
+        // headers read more clearly against the row content below them.
+        let overline_font_size = appearance.overline_font_size() + 2.;
 
         Hoverable::new(mouse_state, move |_state| {
             let label_element = Text::new(label.clone(), overline_font_family, overline_font_size)
@@ -351,8 +365,8 @@ impl UsagePopoverView {
                 )
                 .with_child(
                     Text::new(
-                        format_tokens_with_cost(
-                            total_tokens,
+                        format_tokens_and_cost(
+                            Some(total_tokens),
                             conversation.usage_totals().cost_in_cents,
                         ),
                         appearance.ui_font_family(),
@@ -398,27 +412,24 @@ impl UsagePopoverView {
         let font_size = appearance.ui_font_size();
         let color = color_for_model(&row.model_id);
 
-        let mut left = Flex::row()
+        let label = match row.role_badge {
+            Some(role) => format!("{} ({role})", row.model_id),
+            None => row.model_id.clone(),
+        };
+        let left = Flex::row()
             .with_cross_axis_alignment(CrossAxisAlignment::Center)
             .with_spacing(7.)
             .with_child(render_swatch(color))
             .with_child(
-                Text::new(row.model_id.clone(), appearance.ui_font_family(), font_size)
+                Text::new(label, appearance.ui_font_family(), font_size)
                     .with_color(blended_colors::text_main(theme, background))
                     .soft_wrap(false)
                     .with_clip(ClipConfig::ellipsis())
                     .finish(),
             );
-        if let Some(role) = row.role_badge {
-            left.add_child(
-                Container::new(render_role_pill(role, appearance))
-                    .with_margin_left(6.)
-                    .finish(),
-            );
-        }
 
         let value = Text::new(
-            format_tokens_with_cost(row.tokens, row.cost_in_cents),
+            format_tokens_and_cost(Some(row.tokens), row.cost_in_cents),
             appearance.ui_font_family(),
             font_size,
         )
@@ -457,7 +468,10 @@ impl UsagePopoverView {
                 )
                 .with_child(
                     Text::new(
-                        format_credits(rollup.total_credits),
+                        format_tokens_and_cost(
+                            rollup.total_tokens.map(u64::from),
+                            rollup.total_cost_in_cents,
+                        ),
                         appearance.ui_font_family(),
                         font_size,
                     )
@@ -524,7 +538,7 @@ impl UsagePopoverView {
         .with_clip(ClipConfig::ellipsis())
         .finish();
         let value = Text::new(
-            format_credits(entry.credits_spent),
+            format_tokens_and_cost(entry.tokens.map(u64::from), entry.cost_in_cents),
             appearance.ui_font_family(),
             font_size,
         )
@@ -678,11 +692,7 @@ impl View for UsagePopoverView {
 
         let mut column = Flex::column().with_spacing(12.);
         column.add_child(self.render_header(appearance));
-        column.add_child(self.render_credits_summary_row(
-            conversation,
-            rollup.as_ref(),
-            appearance,
-        ));
+        column.add_child(self.render_total_usage_row(conversation, rollup.as_ref(), appearance));
         column.add_child(self.render_usage_breakdown_section(
             conversation,
             rollup.as_ref(),
@@ -698,14 +708,21 @@ impl View for UsagePopoverView {
             .with_uniform_padding(12.)
             .finish();
 
-        ConstrainedBox::new(content)
+        let popover = ConstrainedBox::new(content)
             .with_width(POPOVER_WIDTH)
+            .finish();
+
+        Dismiss::new(popover)
+            .prevent_interaction_with_other_elements()
+            .on_dismiss(|ctx, _app| {
+                ctx.dispatch_typed_action(UsagePopoverAction::RequestClose);
+            })
             .finish()
     }
 }
 
 impl Entity for UsagePopoverView {
-    type Event = ();
+    type Event = UsagePopoverEvent;
 }
 
 impl TypedActionView for UsagePopoverView {
@@ -732,6 +749,9 @@ impl TypedActionView for UsagePopoverView {
             UsagePopoverAction::ShowFewerRollupAgents => {
                 self.rollup_show_all = false;
                 ctx.notify();
+            }
+            UsagePopoverAction::RequestClose => {
+                ctx.emit(UsagePopoverEvent::Close);
             }
         }
     }
@@ -841,19 +861,26 @@ fn format_token_count(tokens: u64) -> String {
     }
 }
 
-/// Formats a token count alongside its dollar cost, e.g. `"9.6k tokens
-/// ($0.36)"`. The cost suffix is omitted when `cost_in_cents` is `None`
-/// (unknown, not zero) or when `FeatureFlag::PricingTransparency` is
-/// disabled, matching the gating used by [`format_credits_with_cost`]
-/// elsewhere in the usage surfaces.
-fn format_tokens_with_cost(tokens: u64, cost_in_cents: Option<f32>) -> String {
-    let token_text = format!("{} tokens", format_token_count(tokens));
-    if !FeatureFlag::PricingTransparency.is_enabled() {
-        return token_text;
-    }
-    match cost_in_cents {
-        Some(cost) => format!("{token_text} (${:.2})", cost / 100.),
-        None => token_text,
+/// Formats a token count alongside its dollar cost, e.g. `"9.6k tokens /
+/// $0.36"`. Per the pricing-transparency "do not show credits" decision,
+/// this is the only value format used in the popover — credits are never
+/// displayed. Either figure may be unknown (e.g. a rollup contributor
+/// without a per-agent token/cost baseline): the two are joined with `/`
+/// when both are known, and the popover falls back to whichever single
+/// figure is available, or an em dash when neither is known. The dollar
+/// figure is omitted entirely when `FeatureFlag::PricingTransparency` is
+/// disabled.
+pub(crate) fn format_tokens_and_cost(tokens: Option<u64>, cost_in_cents: Option<f32>) -> String {
+    let token_text = tokens.map(|tokens| format!("{} tokens", format_token_count(tokens)));
+    let cost_text = FeatureFlag::PricingTransparency
+        .is_enabled()
+        .then(|| cost_in_cents.map(|cost| format!("${:.2}", cost / 100.)))
+        .flatten();
+    match (token_text, cost_text) {
+        (Some(tokens), Some(cost)) => format!("{tokens} / {cost}"),
+        (Some(tokens), None) => tokens,
+        (None, Some(cost)) => cost,
+        (None, None) => "\u{2014}".to_string(),
     }
 }
 
@@ -871,55 +898,40 @@ fn render_swatch(color: ColorU) -> Box<dyn Element> {
     .finish()
 }
 
-/// Renders the small pill/chip role badge (e.g. "Primary agent"), per
-/// Surface 2 resolved decision 3 (pill component, not parenthetical text)
-/// and resolved decision 4 (no casing normalization — pass through as-is).
-fn render_role_pill(label: &str, appearance: &Appearance) -> Box<dyn Element> {
-    let theme = appearance.theme();
-    Container::new(
-        Text::new(
-            label.to_string(),
-            appearance.ui_font_family(),
-            appearance.ui_font_size() - 2.,
-        )
-        .with_color(theme.background().into_solid())
-        .finish(),
-    )
-    .with_background_color(blended_colors::neutral_6(theme))
-    .with_corner_radius(CornerRadius::with_all(Radius::Pixels(3.)))
-    .with_horizontal_padding(4.)
-    .with_vertical_padding(1.)
-    .finish()
-}
-
 /// Renders a full-width segmented bar. `segments` is a list of (color,
 /// percentage) pairs; any remaining percentage up to 100 is filled with
-/// `track_color`.
+/// `track_color`. The leading and trailing edges of the bar are rounded
+/// (each visible segment's own edges stay square except at those two ends),
+/// giving the overall bar a pill-like shape.
 fn render_segmented_bar(segments: &[(ColorU, f32)], track_color: ColorU) -> Box<dyn Element> {
+    let mut visible: Vec<(ColorU, f32)> = segments
+        .iter()
+        .copied()
+        .filter(|(_, pct)| *pct > 0.)
+        .collect();
+    let used_pct: f32 = visible.iter().map(|(_, pct)| pct).sum();
+    let remainder = (100. - used_pct).max(0.);
+    if remainder > 0. {
+        visible.push((track_color, remainder));
+    }
+
+    let end_radius = Radius::Pixels(BAR_HEIGHT / 2.);
+    let last_index = visible.len().saturating_sub(1);
     let mut row = Flex::row();
-    let mut used_pct = 0.;
-    for (color, pct) in segments {
-        if *pct <= 0. {
-            continue;
+    for (index, (color, pct)) in visible.iter().enumerate() {
+        let mut corner_radius = CornerRadius::default();
+        if index == 0 {
+            corner_radius.merge(CornerRadius::with_left(end_radius));
         }
-        used_pct += pct;
+        if index == last_index {
+            corner_radius.merge(CornerRadius::with_right(end_radius));
+        }
         row.add_child(
             Expanded::new(
                 *pct,
                 Container::new(Empty::new().finish())
                     .with_background_color(*color)
-                    .finish(),
-            )
-            .finish(),
-        );
-    }
-    let remainder = (100. - used_pct).max(0.);
-    if remainder > 0. {
-        row.add_child(
-            Expanded::new(
-                remainder,
-                Container::new(Empty::new().finish())
-                    .with_background_color(track_color)
+                    .with_corner_radius(corner_radius)
                     .finish(),
             )
             .finish(),

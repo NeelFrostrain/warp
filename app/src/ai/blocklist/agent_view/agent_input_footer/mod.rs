@@ -58,8 +58,9 @@ use crate::ai::blocklist::agent_view::is_in_cloud_context;
 use crate::ai::blocklist::history_model::{BlocklistAIHistoryEvent, BlocklistAIHistoryModel};
 use crate::ai::blocklist::prompt::prompt_alert::{PromptAlertEvent, PromptAlertView};
 use crate::ai::blocklist::usage::icon_for_context_window_usage;
-use crate::ai::blocklist::usage::usage_popover_view::UsagePopoverView;
-use crate::ai::blocklist::view_util::format_credits_with_cost;
+use crate::ai::blocklist::usage::usage_popover_view::{
+    UsagePopoverEvent, UsagePopoverView, format_tokens_and_cost,
+};
 use crate::ai::execution_profiles::profiles::AIExecutionProfilesModel;
 use crate::ai::harness_availability::HarnessAvailabilityModel;
 use crate::appearance::Appearance;
@@ -724,6 +725,12 @@ impl AgentInputFooter {
         // time the popover opens; until then it simply renders empty (no matching conversation).
         let usage_popover =
             ctx.add_typed_action_view(|_ctx| UsagePopoverView::new(AIConversationId::new()));
+        ctx.subscribe_to_view(&usage_popover, |me, _, event, ctx| match event {
+            UsagePopoverEvent::Close => {
+                me.usage_popover_open = false;
+                ctx.notify();
+            }
+        });
 
         // Non-interactive cloud follow-up indicators. Only one is rendered at a time, chosen by
         // `AIQueryRouting` at render time.
@@ -2152,7 +2159,7 @@ impl AgentInputFooter {
     }
 
     /// Refreshes the usage button's tooltip with a compact "quick usage" summary
-    /// (credits, tokens, and cost) for the active conversation. The full breakdown is
+    /// (tokens and cost) for the active conversation. The full breakdown is
     /// only shown once the popover itself is opened.
     fn update_usage_button(&mut self, ctx: &mut ViewContext<Self>) {
         let Some(conversation) =
@@ -2161,7 +2168,10 @@ impl AgentInputFooter {
             return;
         };
         let totals = conversation.usage_totals();
-        let tooltip = format_credits_with_cost(totals.credits_spent, None, totals.cost_in_cents);
+        let tokens = totals
+            .charged_usage
+            .map(|usage| u64::from(usage.total_tokens()));
+        let tooltip = format_tokens_and_cost(tokens, totals.cost_in_cents);
         self.usage_button.update(ctx, |button, ctx| {
             button.set_tooltip(Some(tooltip), ctx);
         });
