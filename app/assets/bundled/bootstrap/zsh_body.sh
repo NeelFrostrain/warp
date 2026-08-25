@@ -695,7 +695,16 @@ if [[ -z $WARP_BOOTSTRAPPED ]]; then
           | fzf --scheme=history --tiebreak=index +m)"
         ;;
       *atuin*)
-        result="$(atuin search -i)"
+        # atuin writes its TUI to stdout; under plain command substitution that's a pipe, and
+        # its cursor-position query (\x1b[6n) has nothing to answer it, so it bails during
+        # startup. Swap stdout/stderr through fd 3, matching atuin's own zsh integration
+        # (_atuin_search -> __atuin_search_cmd), so the TUI reaches the tty while the
+        # selection is still captured via command substitution.
+        result="$(ATUIN_SHELL=zsh atuin search -i 3>&1 1>&2 2>&3 3>&-)"
+        # If the user has atuin's enter_accept config on, Enter both selects and runs the
+        # command, signaled by this prefix; we only ever want the selection, never to run it,
+        # so strip the prefix in both cases (see atuin's _atuin_search for the same check).
+        result="${result#__atuin_accept__:}"
         ;;
     esac
     local warp_escaped_selection="$(warp_escape_json "$result")"

@@ -818,6 +818,23 @@ if [ -z "$WARP_BOOTSTRAPPED" ]; then
             # instead -- see fzf's own fallback for that case.
             result="$(__fzf_history__)"
             ;;
+          *atuin*)
+            # Bypass atuin's own bash key-binding machinery entirely (which chains through
+            # intermediate key sequences and a widget dispatcher -- see the detection comment
+            # below) and invoke the underlying `atuin search` command directly, exactly as
+            # atuin's own integration does (__atuin_search_cmd's non-tmux branch).
+            #
+            # atuin writes its TUI to stdout; under plain command substitution that's a pipe,
+            # and its cursor-position query (\x1b[6n) has nothing to answer it, so it bails
+            # during startup. Swap stdout/stderr through fd 3 so the TUI reaches the tty while
+            # the selection is still captured via command substitution.
+            result="$(ATUIN_SHELL=bash atuin search -i 3>&1 1>&2 2>&3 3>&-)"
+            # If the user has atuin's enter_accept config on, Enter both selects and runs the
+            # command, signaled by this prefix; we only ever want the selection, never to run
+            # it, so strip the prefix in both cases (see atuin's __atuin_history for the same
+            # check).
+            result="${result#__atuin_accept__:}"
+            ;;
         esac
         local warp_escaped_selection="$(warp_escape_json "$result")"
         local warp_escaped_token="$(warp_escape_json "$warp_ctrl_r_token")"
@@ -1382,14 +1399,23 @@ esac
 
     shell_plugins=()
 
-    # Detect whether ctrl-r has been rebound to fzf's bash history widget via `bind -x`, so Warp
+    # Detect whether ctrl-r has been rebound to fzf's or atuin's bash history widget, so Warp
     # can hand ctrl-r off to it at an idle prompt instead of opening Warp's own command search.
-    # Detection is scoped to exactly the tool warp_run_external_ctrl_r_widget above knows how to
-    # invoke: fzf's __fzf_history__ works standalone outside of readline context (see that
-    # function's comment). atuin's bash integration binds ctrl-r indirectly through intermediate
-    # key sequences and depends on the readline widget-chain machinery, so it can't be invoked
-    # the same way and is intentionally not tagged here. Also not supported under MSYS2 (Git Bash
-    # on Windows), where ctrl-r always falls through to Warp's own command search.
+    # Not supported under MSYS2 (Git Bash on Windows), where ctrl-r always falls through to
+    # Warp's own command search.
+    #
+    # fzf binds ctrl-r directly via `bind -x`, so `bind -X` reports it verbatim (e.g.
+    # `"\C-r": "__fzf_history__"`); the sed below extracts the bound command's name.
+    #
+    # atuin's binding is not that simple: it goes through an intermediate key sequence and a
+    # widget-index dispatcher (`bind '"\C-r": "\C-x\C-_A1\a..."'` plus a separate
+    # `bind -x '"\C-x\C-_A1\a": __atuin_widget_run 0'`) rather than a direct `-x` bind on
+    # `\C-r` itself, so it never shows up in the `bind -X` scan above. We detect it instead via
+    # atuin's own signal for whether it actually bound ctrl-r (`$__atuin_bind_ctrl_r`, set by
+    # `atuin init bash`) plus confirming its integration is loaded. Either way,
+    # warp_run_external_ctrl_r_widget above never invokes atuin's key-binding machinery -- it
+    # calls the underlying `atuin search` command directly, so how ctrl-r itself is wired up
+    # doesn't matter for invocation, only for detection.
     _WARP_EXTERNAL_CTRL_R_WIDGET=""
     if [ "$WARP_IN_MSYS2" = false ]; then
       warp_ctrl_r_binding="$(bind -X 2>/dev/null | command -p sed -n 's/^"\\C-r": "\(.*\)"$/\1/p')"
@@ -1397,6 +1423,12 @@ esac
         *fzf*)
           _WARP_EXTERNAL_CTRL_R_WIDGET="$warp_ctrl_r_binding"
           shell_plugins+=(external_ctrl_r_history)
+          ;;
+        *)
+          if [[ "$__atuin_bind_ctrl_r" == "true" ]] && declare -F __atuin_history >/dev/null 2>&1; then
+            _WARP_EXTERNAL_CTRL_R_WIDGET="atuin"
+            shell_plugins+=(external_ctrl_r_history)
+          fi
           ;;
       esac
     fi
