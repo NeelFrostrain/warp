@@ -45,6 +45,10 @@ Explore [build.warp.dev](https://build.warp.dev) to:
 - Track your own issues with GitHub sign-in
 - Click into active agent sessions in a web-compiled Warp terminal
 
+## Automate development with Warp Factories
+
+[Request early access](https://www.warp.dev/factories/request-access) to Warp Factories — open infrastructure for cloud software factories, defined in code, built for scale, and easy to deploy on any model or harness, with evals, benchmarks, and self-improvement built in. Learn more at [warp.dev/factories](https://www.warp.dev/factories).
+
 ## Licensing
 
 Warp's UI framework (the `warpui_core` and `warpui` crates) are licensed under the [MIT license](LICENSE-MIT).
