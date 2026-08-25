@@ -2114,6 +2114,53 @@ fn ctrl_t_handoff_splices_selection_after_multi_byte_character() {
     });
 }
 
+/// Cancelling (`insertion: None`) on a mid-line draft must restore the cursor to the byte
+/// offset it was captured at, not merely leave the surrounding text untouched. `set_buffer_text`
+/// alone would leave the cursor at the end of the restored text; only the explicit
+/// `select_ranges_by_byte_offset` call in the `None` arm of `Input::handle_block_completed_event`
+/// repositions it back to where ctrl-t was originally pressed.
+#[test]
+fn ctrl_t_handoff_cancel_restores_cursor_to_original_offset_mid_line() {
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        // Cursor originally sat right after "echo START ", before "END".
+        let (buffer, cursor) = splice_ctrl_t_handoff(&mut app, "echo START END", 11, None).await;
+        assert_eq!(
+            buffer, "echo START END",
+            "cancelling must leave the original text untouched"
+        );
+        assert_eq!(
+            cursor,
+            ByteOffset::from(11),
+            "cancelling must restore the cursor to where ctrl-t was pressed, not the end of the buffer"
+        );
+    });
+}
+
+/// While `ShellWidgetHandoff` is disabled (its default state, matching a user who hasn't opted
+/// into this prototype), the `workspace:trigger_external_ctrl_t_file_search` binding must be
+/// completely ineligible -- not merely a no-op when triggered -- so ctrl-t falls through to
+/// whatever the input editor does with an unhandled key, exactly as it did before this feature
+/// existed. See `EditableBinding::with_enabled` on `init()`'s registration of this binding.
+#[test]
+fn ctrl_t_binding_is_ineligible_when_shell_widget_handoff_flag_is_disabled() {
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+
+        assert!(
+            !FeatureFlag::ShellWidgetHandoff.is_enabled(),
+            "this test assumes the flag defaults to disabled in the test harness"
+        );
+        app.read(|ctx| {
+            assert!(
+                ctx.get_binding_by_name("workspace:trigger_external_ctrl_t_file_search")
+                    .is_none(),
+                "the ctrl-t binding must be ineligible while ShellWidgetHandoff is disabled"
+            );
+        });
+    });
+}
+
 /// Verifies deleting a queued row does not overwrite an existing draft.
 #[test]
 fn row_deleted_event_preserves_existing_draft() {
