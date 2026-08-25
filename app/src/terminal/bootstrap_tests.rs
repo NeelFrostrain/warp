@@ -178,3 +178,80 @@ echo "user:$status"
     assert!(stdout.contains("helper:1"), "{stdout}");
     assert!(stdout.contains("user:1"), "{stdout}");
 }
+
+fn bash_ctrl_t_detection_snippet() -> &'static str {
+    const BASH_SH: &str = include_str!("../../assets/bundled/bootstrap/bash_body.sh");
+    let start_marker = "      _WARP_EXTERNAL_CTRL_T_WIDGET=\"\"\n      warp_ctrl_t_binding=";
+    let end_marker = "          fi\n          ;;\n      esac";
+    let start = BASH_SH
+        .find(start_marker)
+        .expect("bash ctrl-t detection snippet start should exist");
+    let end = BASH_SH[start..]
+        .find(end_marker)
+        .expect("bash ctrl-t detection snippet end should exist");
+    &BASH_SH[start..start + end + end_marker.len()]
+}
+
+fn run_bash(script: &str) -> Option<String> {
+    let output = match command::blocking::Command::new("bash")
+        .args(["--noprofile", "--norc", "-c", script])
+        .output()
+    {
+        Ok(output) => output,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return None,
+        Err(error) => panic!("failed to run bash: {error}"),
+    };
+    assert!(
+        output.status.success(),
+        "bash exited with {:?}\nstdout:\n{}\nstderr:\n{}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    Some(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+/// Regression test for the ctrl-t equivalent of bash's `declare -F __atuin_history` guard on the
+/// ctrl-r path: detection must decline (no tag, no interception) when the picker function
+/// `warp_run_external_ctrl_t_widget` calls -- `__fzf_select__` -- isn't actually defined, even
+/// though `bind -X` reports the wrapper name ("fzf-file-widget") that detection matches against.
+/// Without this guard, an fzf version that renamed its picker function would have ctrl-t tagged
+/// and intercepted with nothing to invoke, swallowing the key instead of leaving it alone.
+#[test]
+fn test_bash_ctrl_t_detection_declines_when_picker_function_is_absent() {
+    let detection = bash_ctrl_t_detection_snippet();
+    let script = format!(
+        r#"
+WARP_IN_MSYS2=false
+shell_plugins=()
+bind -x '"\C-t": fzf-file-widget'
+{detection}
+printf 'widget=[%s] plugins=[%s]\n' "$_WARP_EXTERNAL_CTRL_T_WIDGET" "${{shell_plugins[*]}}"
+"#
+    );
+    let Some(stdout) = run_bash(&script) else {
+        return;
+    };
+    assert!(stdout.contains("widget=[]"), "{stdout}");
+    assert!(!stdout.contains("external_ctrl_t_file"), "{stdout}");
+}
+
+#[test]
+fn test_bash_ctrl_t_detection_tags_when_picker_function_is_present() {
+    let detection = bash_ctrl_t_detection_snippet();
+    let script = format!(
+        r#"
+WARP_IN_MSYS2=false
+shell_plugins=()
+bind -x '"\C-t": fzf-file-widget'
+__fzf_select__() {{ :; }}
+{detection}
+printf 'widget=[%s] plugins=[%s]\n' "$_WARP_EXTERNAL_CTRL_T_WIDGET" "${{shell_plugins[*]}}"
+"#
+    );
+    let Some(stdout) = run_bash(&script) else {
+        return;
+    };
+    assert!(stdout.contains("widget=[fzf-file-widget]"), "{stdout}");
+    assert!(stdout.contains("external_ctrl_t_file"), "{stdout}");
+}

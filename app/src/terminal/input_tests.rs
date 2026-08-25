@@ -195,6 +195,98 @@ fn cancelled_external_ctrl_r_selection_with_empty_buffer_keeps_original_draft() 
 }
 
 #[test]
+fn external_ctrl_t_selection_matching_session_and_token_is_applied() {
+    let mut pending = Some(PendingCtrlTHandoff {
+        session_id: SessionId::from(1),
+        token: "tok-1".to_string(),
+        original_buffer: "echo ".to_string(),
+        cursor_offset: ByteOffset::from(5),
+        insertion: None,
+        block_id: BlockId::new(),
+    });
+    PendingCtrlTHandoff::maybe_apply_selection(
+        &mut pending,
+        SessionId::from(1),
+        "tok-1",
+        "selected/file.txt",
+    );
+    assert_eq!(
+        pending.unwrap().insertion,
+        Some("selected/file.txt".to_string())
+    );
+}
+
+#[test]
+fn unsolicited_external_ctrl_t_selection_without_a_pending_handoff_is_ignored() {
+    // No handoff was ever started (e.g. a stray write to the pty unrelated to ctrl-t): there's
+    // nothing to apply the selection to, and no handoff gets created.
+    let mut pending: Option<PendingCtrlTHandoff> = None;
+    PendingCtrlTHandoff::maybe_apply_selection(
+        &mut pending,
+        SessionId::from(1),
+        "tok-1",
+        "selected/file.txt",
+    );
+    assert!(pending.is_none());
+}
+
+#[test]
+fn stale_external_ctrl_t_selection_with_mismatched_token_is_ignored() {
+    let mut pending = Some(PendingCtrlTHandoff {
+        session_id: SessionId::from(1),
+        token: "tok-1".to_string(),
+        original_buffer: "echo ".to_string(),
+        cursor_offset: ByteOffset::from(5),
+        insertion: None,
+        block_id: BlockId::new(),
+    });
+    PendingCtrlTHandoff::maybe_apply_selection(
+        &mut pending,
+        SessionId::from(1),
+        "some-other-token",
+        "selected/file.txt",
+    );
+    assert_eq!(pending.unwrap().insertion, None);
+}
+
+#[test]
+fn stale_external_ctrl_t_selection_with_mismatched_session_is_ignored() {
+    let mut pending = Some(PendingCtrlTHandoff {
+        session_id: SessionId::from(1),
+        token: "tok-1".to_string(),
+        original_buffer: "echo ".to_string(),
+        cursor_offset: ByteOffset::from(5),
+        insertion: None,
+        block_id: BlockId::new(),
+    });
+    PendingCtrlTHandoff::maybe_apply_selection(
+        &mut pending,
+        SessionId::from(2),
+        "tok-1",
+        "selected/file.txt",
+    );
+    assert_eq!(pending.unwrap().insertion, None);
+}
+
+#[test]
+fn cancelled_external_ctrl_t_selection_with_empty_buffer_leaves_insertion_unset() {
+    // An empty buffer means the handoff matched but the user cancelled without selecting
+    // anything, so `insertion` must stay `None` rather than becoming `Some("")`: the landing
+    // logic (see Input::handle_block_completed_event) treats `None` as "just restore the
+    // cursor position", which a `Some("")` would bypass by splicing in empty text instead.
+    let mut pending = Some(PendingCtrlTHandoff {
+        session_id: SessionId::from(1),
+        token: "tok-1".to_string(),
+        original_buffer: "echo ".to_string(),
+        cursor_offset: ByteOffset::from(5),
+        insertion: None,
+        block_id: BlockId::new(),
+    });
+    PendingCtrlTHandoff::maybe_apply_selection(&mut pending, SessionId::from(1), "tok-1", "");
+    assert_eq!(pending.unwrap().insertion, None);
+}
+
+#[test]
 fn renders_git_checkout_prompt_chip_command_as_single_shell_argument() {
     let command = PromptChipShellCommand::GitCheckout {
         branch_name: "poc;id>/tmp/proof $(whoami) `id` | cat 'tail'".to_string(),
