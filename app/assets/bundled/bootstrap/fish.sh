@@ -715,8 +715,17 @@ function warp_bootstrapped
   set -l warp_ctrl_t_widget (warp_external_ctrl_t_widget)
   switch "$warp_ctrl_t_widget"
     case 'fzf-file-widget'
-      set -g _WARP_EXTERNAL_CTRL_T_WIDGET "$warp_ctrl_t_widget"
-      set -a shell_plugins external_ctrl_t_file
+      # warp_run_external_ctrl_t_widget calls fzf's own __fzf_defaults/__fzfcmd helpers rather
+      # than reproducing their option-merging logic; older fzf's fish integration (still
+      # packaged by several distros) binds the same "fzf-file-widget" key but has no
+      # __fzf_defaults function at all (it builds FZF_DEFAULT_OPTS inline instead). Only
+      # tag/intercept when both helpers actually exist, so a version mismatch here can never
+      # claim ctrl-t and then have warp_run_external_ctrl_t_widget find nothing to call --
+      # that would swallow the key with no picker shown instead of leaving ctrl-t alone.
+      if functions -q __fzf_defaults; and functions -q __fzfcmd
+        set -g _WARP_EXTERNAL_CTRL_T_WIDGET "$warp_ctrl_t_widget"
+        set -a shell_plugins external_ctrl_t_file
+      end
   end
   set -l escaped_shell_plugins (warp_escape_json $shell_plugins)
 

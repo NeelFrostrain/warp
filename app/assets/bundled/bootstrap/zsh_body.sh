@@ -731,12 +731,18 @@ if [[ -z $WARP_BOOTSTRAPPED ]]; then
     local result=""
     case "$_WARP_EXTERNAL_CTRL_T_WIDGET" in
       fzf-file-widget)
-        # __fzf_select (installed by fzf's zsh integration) runs the same find|fzf pipeline
-        # fzf-file-widget itself uses, honoring $FZF_CTRL_T_COMMAND/$FZF_CTRL_T_OPTS if the user
-        # set them, and echoes the shell-quoted selection to stdout -- this is exactly what
-        # fzf-file-widget calls before splicing the result into LBUFFER at the cursor itself,
-        # which we don't want here since we land the selection ourselves.
-        result="$(__fzf_select)"
+        # __fzf_select (current fzf) or __fsel (fzf < 0.48, still the packaged version on some
+        # distros) runs the same find|fzf pipeline fzf-file-widget itself uses, honoring
+        # $FZF_CTRL_T_COMMAND/$FZF_CTRL_T_OPTS if the user set them, and echoes the
+        # shell-quoted selection to stdout -- this is exactly what fzf-file-widget calls before
+        # splicing the result into LBUFFER at the cursor itself, which we don't want here since
+        # we land the selection ourselves. Detection below only tags this widget when one of the
+        # two is actually defined, so this case is never reached with neither present.
+        if (( $+functions[__fzf_select] )); then
+          result="$(__fzf_select)"
+        else
+          result="$(__fsel)"
+        fi
         ;;
     esac
     local warp_escaped_selection="$(warp_escape_json "$result")"
@@ -1422,8 +1428,16 @@ esac
     warp_ctrl_t_widget="${warp_ctrl_t_binding#\"^T\" }"
     case "$warp_ctrl_t_widget" in
       fzf-file-widget)
-        _WARP_EXTERNAL_CTRL_T_WIDGET="$warp_ctrl_t_widget"
-        shell_plugins+=(external_ctrl_t_file)
+        # The zle widget name has stayed "fzf-file-widget" across fzf versions, but the picker
+        # it delegates to was renamed from __fsel to __fzf_select along the way (fzf < 0.48
+        # still ships as the packaged version on several distros); only tag/intercept when one
+        # of the two invocable names actually exists, so a version mismatch here can never
+        # claim ctrl-t and then have warp_run_external_ctrl_t_widget find nothing to call --
+        # that would swallow the key with no picker shown instead of leaving ctrl-t alone.
+        if (( $+functions[__fzf_select] )) || (( $+functions[__fsel] )); then
+          _WARP_EXTERNAL_CTRL_T_WIDGET="$warp_ctrl_t_widget"
+          shell_plugins+=(external_ctrl_t_file)
+        fi
         ;;
     esac
   fi
