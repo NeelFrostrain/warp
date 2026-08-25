@@ -523,8 +523,8 @@ fn enabled_features() -> HashSet<FeatureFlag> {
         FeatureFlag::TerminalLifecycleRecovery,
         #[cfg(feature = "ctrl_c_cancels_third_party_harness")]
         FeatureFlag::CtrlCCancelsThirdPartyHarness,
-        #[cfg(feature = "fzf_ctrl_r_handoff")]
-        FeatureFlag::FzfCtrlRHandoff,
+        #[cfg(feature = "shell_widget_handoff")]
+        FeatureFlag::ShellWidgetHandoff,
     ]);
 
     flags

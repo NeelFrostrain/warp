@@ -9215,7 +9215,7 @@ impl TerminalView {
         &mut self,
         ctx: &mut ViewContext<Self>,
     ) -> bool {
-        if !FeatureFlag::FzfCtrlRHandoff.is_enabled() || self.is_long_running() {
+        if !FeatureFlag::ShellWidgetHandoff.is_enabled() || self.is_long_running() {
             return false;
         }
         let Some(session_id) = self.active_block_session_id() else {
@@ -12974,7 +12974,7 @@ impl TerminalView {
                 }
             }
             ModelEvent::ExternalCtrlRSelection(data) => {
-                if FeatureFlag::FzfCtrlRHandoff.is_enabled()
+                if FeatureFlag::ShellWidgetHandoff.is_enabled()
                     && let Some(session_id) = data.session_id.map(SessionId::from)
                 {
                     self.input.update(ctx, |input, _ctx| {
