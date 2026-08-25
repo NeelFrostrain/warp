@@ -55,18 +55,28 @@ fn model_usage_rows_has_no_badge_for_unknown_categories() {
     assert_eq!(rows[0].role_badge, None);
 }
 
+fn charged_usage_with_input_cost(cost_in_cents: f32) -> ChargedUsageTotals {
+    ChargedUsageTotals {
+        input_cost_in_cents: cost_in_cents,
+        ..Default::default()
+    }
+}
+
 #[test]
-fn model_usage_rows_joins_cost_by_model_id() {
+fn model_usage_rows_joins_charged_usage_by_model_id() {
     let models = vec![
         model("gpt-5.5", 100, PRIMARY_AGENT_CATEGORY),
         model("codex-model", 50, FULL_TERMINAL_USE_CATEGORY),
     ];
-    let costs = HashMap::from([("gpt-5.5".to_string(), 36.0)]);
-    let rows = model_usage_rows(&models, &costs);
+    let charged_usage_by_model =
+        HashMap::from([("gpt-5.5".to_string(), charged_usage_with_input_cost(36.0))]);
+    let rows = model_usage_rows(&models, &charged_usage_by_model);
     let gpt_row = rows.iter().find(|r| r.model_id == "gpt-5.5").unwrap();
     let codex_row = rows.iter().find(|r| r.model_id == "codex-model").unwrap();
     assert_eq!(gpt_row.cost_in_cents, Some(36.0));
+    assert!(gpt_row.charged_usage.is_some());
     assert_eq!(codex_row.cost_in_cents, None);
+    assert!(codex_row.charged_usage.is_none());
 }
 
 fn per_agent_entry(name: &str, credits: f32) -> PerAgentCreditEntry {
@@ -150,4 +160,21 @@ fn format_tokens_and_cost_shows_em_dash_when_both_are_unknown() {
     let _flag = FeatureFlag::PricingTransparency.override_enabled(true);
 
     assert_eq!(format_tokens_and_cost(None, None), "\u{2014}");
+}
+
+#[test]
+fn format_count_and_cost_omits_dollar_suffix_when_flag_disabled() {
+    let _flag = FeatureFlag::PricingTransparency.override_enabled(false);
+
+    assert_eq!(format_count_and_cost(3, "searches", 2.0), "3 searches");
+}
+
+#[test]
+fn format_count_and_cost_appends_dollar_suffix_when_flag_enabled() {
+    let _flag = FeatureFlag::PricingTransparency.override_enabled(true);
+
+    assert_eq!(
+        format_count_and_cost(3, "searches", 2.0),
+        "3 searches / $0.02"
+    );
 }

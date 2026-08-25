@@ -1799,6 +1799,44 @@ impl From<&stream_finished::RequestCharges> for ChargedUsageTotals {
     }
 }
 
+impl ChargedUsageTotals {
+    /// Sums a category-keyed `RequestCharges` map (per-turn or cumulative)
+    /// into a per-model breakdown, preserving the model-id dimension that
+    /// [`Self::from`] discards. Platform cost is excluded since the wire
+    /// format doesn't attribute it to any single model.
+    ///
+    /// `custom_endpoint_inference_usage` is keyed by the model's raw
+    /// `config_key` rather than a display-friendly id; `resolve_custom_endpoint_model_id`
+    /// translates it to whatever id the caller's other per-model data (e.g.
+    /// token usage) uses for custom endpoints, so the two can be joined by
+    /// key. Callers with no such translation can pass `str::to_string`.
+    pub fn per_model_from(
+        charges: &stream_finished::RequestCharges,
+        resolve_custom_endpoint_model_id: impl Fn(&str) -> String,
+    ) -> HashMap<String, ChargedUsageTotals> {
+        let mut totals_by_model: HashMap<String, ChargedUsageTotals> = HashMap::new();
+        for usage in charges.usage_by_category.values() {
+            for (model_id, inference_usage) in usage
+                .direct_api_inference_usage
+                .iter()
+                .chain(usage.byok_inference_usage.iter())
+            {
+                totals_by_model
+                    .entry(model_id.clone())
+                    .or_default()
+                    .add_inference_usage(inference_usage);
+            }
+            for (config_key, inference_usage) in usage.custom_endpoint_inference_usage.iter() {
+                totals_by_model
+                    .entry(resolve_custom_endpoint_model_id(config_key))
+                    .or_default()
+                    .add_inference_usage(inference_usage);
+            }
+        }
+        totals_by_model
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone, Default)]
 pub struct ConversationUsageMetadata {
     pub was_summarized: bool,

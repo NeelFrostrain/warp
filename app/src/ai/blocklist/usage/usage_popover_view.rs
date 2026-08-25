@@ -25,15 +25,15 @@
 //! (matching the existing per-block pill's live-update behavior).
 
 use std::cmp::Ordering;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use pathfinder_color::ColorU;
 use warp_core::ui::Icon;
 use warp_core::ui::theme::WarpTheme;
 use warpui::elements::{
-    Border, ConstrainedBox, Container, CornerRadius, CrossAxisAlignment, Dismiss, Empty, Expanded,
-    Flex, Hoverable, MainAxisAlignment, MainAxisSize, MouseStateHandle, ParentElement, Radius,
-    Text,
+    Border, ConstrainedBox, Container, CornerRadius, CrossAxisAlignment, Dismiss,
+    DispatchEventResult, Empty, EventHandler, Expanded, Flex, Hoverable, MainAxisAlignment,
+    MainAxisSize, MouseStateHandle, ParentElement, Radius, Text,
 };
 use warpui::platform::Cursor;
 use warpui::text_layout::ClipConfig;
@@ -51,7 +51,7 @@ use crate::ai::blocklist::usage::rollup::{
 use crate::appearance::Appearance;
 use crate::features::FeatureFlag;
 use crate::persistence::model::{
-    FULL_TERMINAL_USE_CATEGORY, ModelTokenUsage, PRIMARY_AGENT_CATEGORY,
+    ChargedUsageTotals, FULL_TERMINAL_USE_CATEGORY, ModelTokenUsage, PRIMARY_AGENT_CATEGORY,
 };
 use crate::settings_view::SettingsSection;
 use crate::ui_components::blended_colors;
@@ -78,6 +78,9 @@ pub enum UsagePopoverAction {
     /// Dispatched by the [`Dismiss`] underlay when the user clicks outside
     /// the popover.
     RequestClose,
+    /// Toggles the per-model token/cost breakdown subsection for the given
+    /// model id.
+    ToggleModelExpanded(String),
 }
 
 /// Emitted when the popover should be closed, so the footer (which owns
@@ -111,6 +114,10 @@ pub struct UsagePopoverView {
     tool_call_summary_section_expanded: bool,
     response_time_section_expanded: bool,
     rollup_show_all: bool,
+    /// Model ids whose per-model breakdown subsection is currently expanded.
+    /// Keyed by model id rather than a fixed set of fields since the list of
+    /// models is dynamic per-conversation.
+    expanded_model_ids: HashSet<String>,
     model_usage_toggle_mouse_state: MouseStateHandle,
     tool_call_summary_toggle_mouse_state: MouseStateHandle,
     response_time_toggle_mouse_state: MouseStateHandle,
@@ -129,6 +136,7 @@ impl UsagePopoverView {
             tool_call_summary_section_expanded: true,
             response_time_section_expanded: true,
             rollup_show_all: false,
+            expanded_model_ids: HashSet::new(),
             model_usage_toggle_mouse_state: MouseStateHandle::default(),
             tool_call_summary_toggle_mouse_state: MouseStateHandle::default(),
             response_time_toggle_mouse_state: MouseStateHandle::default(),
@@ -329,15 +337,14 @@ impl UsagePopoverView {
         conversation: &AIConversation,
         appearance: &Appearance,
     ) -> Box<dyn Element> {
-        // Token counts (with role-category info for the badges) and
-        // per-model dollar cost come from two different underlying
-        // structures, so join them here by model id.
-        let costs_by_model: HashMap<String, f32> = conversation
-            .total_token_usage()
-            .into_iter()
-            .map(|usage| (usage.model_id, usage.cost_in_cents))
-            .collect();
-        let rows = model_usage_rows(conversation.token_usage(), &costs_by_model);
+        // Token counts (with role-category info for the badges) come from a
+        // different underlying structure than the per-model charged-usage
+        // breakdown (cost + input/output/cache/web split), so join them here
+        // by model id.
+        let rows = model_usage_rows(
+            conversation.token_usage(),
+            conversation.charged_usage_by_model(),
+        );
         if rows.is_empty() {
             return Empty::new().finish();
         }
@@ -402,6 +409,10 @@ impl UsagePopoverView {
         column.finish()
     }
 
+    /// Renders a per-model row. When the model has a known charged-usage
+    /// breakdown, the row is clickable (a leading chevron indicates this)
+    /// and toggles an input/output/cache/web-search breakdown subsection
+    /// beneath it.
     fn render_model_usage_row(
         &self,
         row: &ModelUsageRow,
@@ -411,22 +422,37 @@ impl UsagePopoverView {
         let background = theme.surface_2();
         let font_size = appearance.ui_font_size();
         let color = color_for_model(&row.model_id);
+        let expanded = self.expanded_model_ids.contains(&row.model_id);
 
         let label = match row.role_badge {
             Some(role) => format!("{} ({role})", row.model_id),
             None => row.model_id.clone(),
         };
-        let left = Flex::row()
+        let mut left = Flex::row()
             .with_cross_axis_alignment(CrossAxisAlignment::Center)
-            .with_spacing(7.)
-            .with_child(render_swatch(color))
-            .with_child(
-                Text::new(label, appearance.ui_font_family(), font_size)
-                    .with_color(blended_colors::text_main(theme, background))
-                    .soft_wrap(false)
-                    .with_clip(ClipConfig::ellipsis())
+            .with_spacing(7.);
+        if row.charged_usage.is_some() {
+            let chevron_color = blended_colors::text_disabled(theme, background);
+            let chevron_icon = if expanded {
+                Icon::ChevronDown
+            } else {
+                Icon::ChevronRight
+            };
+            left.add_child(
+                ConstrainedBox::new(chevron_icon.to_warpui_icon(chevron_color.into()).finish())
+                    .with_width(10.)
+                    .with_height(10.)
                     .finish(),
             );
+        }
+        left.add_child(render_swatch(color));
+        left.add_child(
+            Text::new(label, appearance.ui_font_family(), font_size)
+                .with_color(blended_colors::text_main(theme, background))
+                .soft_wrap(false)
+                .with_clip(ClipConfig::ellipsis())
+                .finish(),
+        );
 
         let value = Text::new(
             format_tokens_and_cost(Some(row.tokens), row.cost_in_cents),
@@ -436,9 +462,32 @@ impl UsagePopoverView {
         .with_color(blended_colors::text_sub(theme, background))
         .finish();
 
-        space_between_row()
+        let summary_row = space_between_row()
             .with_child(left.finish())
             .with_child(value)
+            .finish();
+
+        let Some(charged_usage) = row.charged_usage else {
+            return summary_row;
+        };
+
+        let mut column = Flex::column().with_spacing(6.).with_child(summary_row);
+        if expanded {
+            column.add_child(
+                Container::new(render_charged_usage_breakdown(&charged_usage, appearance))
+                    .with_padding_left(15.)
+                    .finish(),
+            );
+        }
+
+        let model_id = row.model_id.clone();
+        EventHandler::new(column.finish())
+            .on_left_mouse_down(move |ctx, _, _| {
+                ctx.dispatch_typed_action(UsagePopoverAction::ToggleModelExpanded(
+                    model_id.clone(),
+                ));
+                DispatchEventResult::StopPropagation
+            })
             .finish()
     }
 
@@ -712,6 +761,16 @@ impl View for UsagePopoverView {
             .with_width(POPOVER_WIDTH)
             .finish();
 
+        // Swallows any left-click that lands within the popover's own bounds
+        // (even on inert content like labels/padding) before it ever reaches
+        // `Dismiss`'s outside-click check below — otherwise every click inside
+        // the popover that doesn't land on an interactive element (a link,
+        // section header, etc.) would be treated as an "outside" click and
+        // close the popover.
+        let popover = EventHandler::new(popover)
+            .on_left_mouse_down(|_, _, _| DispatchEventResult::StopPropagation)
+            .finish();
+
         Dismiss::new(popover)
             .prevent_interaction_with_other_elements()
             .on_dismiss(|ctx, _app| {
@@ -753,21 +812,29 @@ impl TypedActionView for UsagePopoverView {
             UsagePopoverAction::RequestClose => {
                 ctx.emit(UsagePopoverEvent::Close);
             }
+            UsagePopoverAction::ToggleModelExpanded(model_id) => {
+                if !self.expanded_model_ids.remove(model_id) {
+                    self.expanded_model_ids.insert(model_id.clone());
+                }
+                ctx.notify();
+            }
         }
     }
 }
 
 /// One row of the per-model usage breakdown, aggregated across a model's
 /// warp/byok/custom-endpoint token counts. Role badges mirror the existing
-/// credits-based breakdown's category constants. `cost_in_cents` comes from
-/// a separate per-model cost structure (`AIConversation::total_token_usage`)
+/// credits-based breakdown's category constants. `charged_usage` comes from
+/// a separate per-model structure (`AIConversation::charged_usage_by_model`)
 /// joined in by model id, since the token/category source
-/// (`AIConversation::token_usage`) doesn't carry cost.
+/// (`AIConversation::token_usage`) doesn't carry cost; `cost_in_cents` is
+/// derived from it for the collapsed row's value text.
 struct ModelUsageRow {
     model_id: String,
     role_badge: Option<&'static str>,
     tokens: u64,
     cost_in_cents: Option<f32>,
+    charged_usage: Option<ChargedUsageTotals>,
 }
 
 /// Builds the sorted per-model row list from raw per-conversation token
@@ -775,7 +842,7 @@ struct ModelUsageRow {
 /// credits-based breakdown's sort), then alphabetically by model id.
 fn model_usage_rows(
     models: &[ModelTokenUsage],
-    costs_by_model: &HashMap<String, f32>,
+    charged_usage_by_model: &HashMap<String, ChargedUsageTotals>,
 ) -> Vec<ModelUsageRow> {
     let mut rows: Vec<ModelUsageRow> = models
         .iter()
@@ -787,11 +854,13 @@ fn model_usage_rows(
                 return None;
             }
             let role_badge = role_badge_for_model(model);
+            let charged_usage = charged_usage_by_model.get(&model.model_id).copied();
             Some(ModelUsageRow {
                 model_id: model.model_id.clone(),
                 role_badge,
                 tokens,
-                cost_in_cents: costs_by_model.get(&model.model_id).copied(),
+                cost_in_cents: charged_usage.map(|usage| usage.total_cost_in_cents()),
+                charged_usage,
             })
         })
         .collect();
@@ -882,6 +951,81 @@ pub(crate) fn format_tokens_and_cost(tokens: Option<u64>, cost_in_cents: Option<
         (None, Some(cost)) => cost,
         (None, None) => "\u{2014}".to_string(),
     }
+}
+
+/// Formats a count alongside its dollar cost, e.g. `"3 searches / $0.02"`,
+/// for breakdown rows whose unit isn't tokens (currently just web
+/// searches). The dollar figure is omitted when `FeatureFlag::PricingTransparency`
+/// is disabled, matching [`format_tokens_and_cost`].
+fn format_count_and_cost(count: u32, unit: &str, cost_in_cents: f32) -> String {
+    let count_text = format!("{count} {unit}");
+    if !FeatureFlag::PricingTransparency.is_enabled() {
+        return count_text;
+    }
+    format!("{count_text} / ${:.2}", cost_in_cents / 100.)
+}
+
+/// Renders a model's input/output/cache/web-search charged-usage breakdown,
+/// shown beneath a per-model row when expanded. Rows are omitted for
+/// categories the model didn't incur (e.g. cache tokens only apply to
+/// Anthropic models, and web searches are relatively rare).
+fn render_charged_usage_breakdown(
+    charged_usage: &ChargedUsageTotals,
+    appearance: &Appearance,
+) -> Box<dyn Element> {
+    let mut column = Flex::column().with_spacing(4.);
+    if charged_usage.input_tokens > 0 {
+        column.add_child(render_label_value_row(
+            "Input tokens",
+            format_tokens_and_cost(
+                Some(charged_usage.input_tokens as u64),
+                Some(charged_usage.input_cost_in_cents),
+            ),
+            appearance,
+        ));
+    }
+    if charged_usage.output_tokens > 0 {
+        column.add_child(render_label_value_row(
+            "Output tokens",
+            format_tokens_and_cost(
+                Some(charged_usage.output_tokens as u64),
+                Some(charged_usage.output_cost_in_cents),
+            ),
+            appearance,
+        ));
+    }
+    if charged_usage.input_cache_read_tokens > 0 {
+        column.add_child(render_label_value_row(
+            "Cache read tokens",
+            format_tokens_and_cost(
+                Some(charged_usage.input_cache_read_tokens as u64),
+                Some(charged_usage.input_cache_read_cost_in_cents),
+            ),
+            appearance,
+        ));
+    }
+    if charged_usage.input_cache_write_tokens > 0 {
+        column.add_child(render_label_value_row(
+            "Cache write tokens",
+            format_tokens_and_cost(
+                Some(charged_usage.input_cache_write_tokens as u64),
+                Some(charged_usage.input_cache_write_cost_in_cents),
+            ),
+            appearance,
+        ));
+    }
+    if charged_usage.web_search_count > 0 {
+        column.add_child(render_label_value_row(
+            "Web searches",
+            format_count_and_cost(
+                charged_usage.web_search_count,
+                "searches",
+                charged_usage.web_search_cost_in_cents,
+            ),
+            appearance,
+        ));
+    }
+    column.finish()
 }
 
 /// Renders a small rounded color swatch used to key a row to its bar
