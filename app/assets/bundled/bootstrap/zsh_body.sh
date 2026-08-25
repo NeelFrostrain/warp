@@ -705,11 +705,12 @@ if [[ -z $WARP_BOOTSTRAPPED ]]; then
         # command, signaled by this prefix; we only ever want the selection, never to run it,
         # so strip the prefix in both cases (see atuin's _atuin_search for the same check).
         result="${result#__atuin_accept__:}"
-        # atuin's own preexec/precmd hooks already recorded this invocation into its separate
-        # history database the moment it started -- independent of the zshaddhistory exclusion
-        # above, which only keeps it out of zsh's own history. Delete that entry now so it
-        # doesn't show up the next time the user searches with ctrl-r; the handoff token makes
-        # the match exact.
+        # The invocation is given a leading space (see
+        # trigger_external_ctrl_r_history_search), which atuin's own "ignorespace" exclusion
+        # honors independent of the zshaddhistory exclusion above (which only keeps it out of
+        # zsh's own history), so this should normally be a no-op. Delete it anyway as a safety
+        # net in case that exclusion doesn't apply for some reason; the handoff token makes the
+        # match exact.
         atuin search --delete -- "warp_run_external_ctrl_r_widget $warp_ctrl_r_token" >/dev/null 2>&1
         ;;
     esac

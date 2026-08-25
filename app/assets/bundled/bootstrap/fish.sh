@@ -579,10 +579,11 @@ function warp_run_external_ctrl_r_widget
       # atuin prefixes the selection with __atuin_accept__: when `enter_accept` is on and the
       # user pressed enter. Warp always inserts without executing, so the prefix is dropped.
       set result (string replace "__atuin_accept__:" "" -- "$output" | string collect)
-      # atuin's own preexec/precmd hooks already recorded this invocation into its separate
-      # history database the moment it started -- independent of the fish_should_add_to_history
-      # exclusion above, which only keeps it out of fish's own history. Delete that entry now
-      # so it doesn't show up the next time the user searches with ctrl-r; the handoff token
+      # The invocation is given a leading space (see
+      # trigger_external_ctrl_r_history_search), which atuin's own "ignorespace" exclusion
+      # honors independent of the fish_should_add_to_history exclusion above (which only keeps
+      # it out of fish's own history), so this should normally be a no-op. Delete it anyway as
+      # a safety net in case that exclusion doesn't apply for some reason; the handoff token
       # makes the match exact.
       atuin search --delete -- "warp_run_external_ctrl_r_widget $warp_ctrl_r_token" >/dev/null 2>&1
   end
