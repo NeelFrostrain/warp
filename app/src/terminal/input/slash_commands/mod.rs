@@ -1344,6 +1344,7 @@ impl Input {
             | SlashCommandKind::Exit
             | SlashCommandKind::Logout
             | SlashCommandKind::Clear
+            | SlashCommandKind::Team
             | SlashCommandKind::Status => {
                 debug_assert!(
                     false,
