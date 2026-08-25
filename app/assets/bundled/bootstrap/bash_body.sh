@@ -1428,8 +1428,7 @@ esac
     #
     # Newer atuin (>= 18.10) instead binds ctrl-r to an intermediate key sequence dispatched
     # through a separate widget-index binding, which `bind -X` alone can't reliably distinguish
-    # from an arbitrary user macro. We decline the handoff in that case rather than risk
-    # hijacking a key the user rebound to something else.
+    # from an arbitrary user macro; the fallback below handles that case.
     _WARP_EXTERNAL_CTRL_R_WIDGET=""
     if [ "$WARP_IN_MSYS2" = false ]; then
       warp_ctrl_r_binding="$(bind -X 2>/dev/null | command -p sed -n 's/^"\\C-r": "\(.*\)"$/\1/p')"
@@ -1439,6 +1438,19 @@ esac
           shell_plugins+=(external_ctrl_r_history)
           ;;
       esac
+      # atuin >= 18.10 binds ctrl-r through the indirect dispatcher above rather than a plain
+      # `bind -x`, so the exact-allowlist match above never fires for it. Rather than resolve
+      # that indirection, trust atuin's own init-time flag ($__atuin_bind_ctrl_r) plus
+      # __atuin_history actually being defined as sufficient evidence atuin owns ctrl-r. This
+      # is a deliberately looser check than the live-binding match above: a ctrl-r rebound
+      # after atuin's init runs (a rare sequencing) won't be detected, which is an accepted
+      # trade-off in favor of covering the common bash+atuin case at all. fzf has no equivalent
+      # flag and keeps using the live-binding match exclusively.
+      if [ -z "$_WARP_EXTERNAL_CTRL_R_WIDGET" ] && [ "$__atuin_bind_ctrl_r" = true ] &&
+        declare -F __atuin_history >/dev/null; then
+        _WARP_EXTERNAL_CTRL_R_WIDGET="__atuin_history"
+        shell_plugins+=(external_ctrl_r_history)
+      fi
     fi
 
     function warp_bootstrapped () {
