@@ -833,6 +833,12 @@ if [ -z "$WARP_BOOTSTRAPPED" ]; then
             # it, so strip the prefix in both cases (see atuin's __atuin_history for the same
             # check).
             result="${result#__atuin_accept__:}"
+            # atuin's own preexec/precmd hooks already recorded this invocation into its
+            # separate history database the moment it started -- independent of HISTIGNORE,
+            # which only keeps it out of bash's own history. Delete that entry now so it
+            # doesn't show up the next time the user searches with ctrl-r; the handoff token
+            # makes the match exact.
+            atuin search --delete -- "warp_run_external_ctrl_r_widget $warp_ctrl_r_token" >/dev/null 2>&1
             ;;
         esac
         local warp_escaped_selection="$(warp_escape_json "$result")"
@@ -1427,9 +1433,19 @@ esac
     if [ "$WARP_IN_MSYS2" = false ]; then
       warp_ctrl_r_binding="$(bind -X 2>/dev/null | command -p sed -n 's/^"\\C-r": "\(.*\)"$/\1/p')"
       case "$warp_ctrl_r_binding" in
-        __fzf_history__|__atuin_history)
+        __fzf_history__)
           _WARP_EXTERNAL_CTRL_R_WIDGET="$warp_ctrl_r_binding"
           shell_plugins+=(external_ctrl_r_history)
+          ;;
+        __atuin_history)
+          _WARP_EXTERNAL_CTRL_R_WIDGET="$warp_ctrl_r_binding"
+          shell_plugins+=(external_ctrl_r_history)
+          # atuin records every command into its own history database via its own preexec/precmd
+          # hooks, independent of HISTIGNORE, so past handoff invocations (e.g. from before this
+          # cleanup existed, or a session that exited before warp_run_external_ctrl_r_widget's own
+          # cleanup ran) can still be sitting in it. Sweep those up once per bootstrap; backgrounded
+          # since it's pure hygiene and not needed for the handoff itself to work.
+          (atuin search --delete -- "warp_run_external_ctrl_r_widget" >/dev/null 2>&1 &)
           ;;
       esac
     fi
