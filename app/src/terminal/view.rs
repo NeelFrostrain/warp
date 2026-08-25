@@ -714,6 +714,16 @@ pub const DEFAULT_ASK_AI_AUTOSUGGESTION_TEXT: &str = "What happened here?";
 
 const WARP_MD_PATH: &str = "WARP.md";
 
+/// `shell_plugins` tag reported by bootstrap when the shell's `^R` binding has been rebound away
+/// from its default reverse-history-search widget (e.g. by fzf or atuin). Must match the tag
+/// name used in `app/assets/bundled/bootstrap/zsh_body.sh`.
+const EXTERNAL_CTRL_R_HISTORY_PLUGIN_TAG: &str = "external_ctrl_r_history";
+
+/// Name of the bootstrap-installed shell function invoked to hand ctrl-r off to the shell's
+/// own external history widget. Must match the function name defined in
+/// `app/assets/bundled/bootstrap/zsh_body.sh`.
+const EXTERNAL_CTRL_R_HELPER_COMMAND: &str = "warp_run_external_ctrl_r_widget";
+
 pub const LONG_RUNNING_AGENT_REQUESTED_COMMAND_CONTEXT_KEY: &str = "LongRunningRequestedCommand";
 pub const LONG_RUNNING_AGENT_REQUESTED_COMMAND_USER_TOOK_OVER_CONTEXT_KEY: &str =
     "LongRunningRequestedUserTookOverCommand";
@@ -9186,6 +9196,50 @@ impl TerminalView {
             && !model.is_read_only()
     }
 
+    /// If ctrl-r was pressed at an idle prompt on a session whose shell has rebound `^R` away
+    /// from its default reverse-history-search widget (reported via the
+    /// [`EXTERNAL_CTRL_R_HISTORY_PLUGIN_TAG`] shell plugin tag, e.g. by fzf or atuin), hands the
+    /// keypress off to that widget instead of opening Warp's own command search.
+    ///
+    /// The handoff runs a bootstrap-installed helper through the normal command-execution path
+    /// (as if the user had typed and submitted it), so the existing long-running-command
+    /// machinery hides the input editor and forwards keystrokes to the widget's PTY-driven UI.
+    /// The command the user selects (or the buffer they had before ctrl-r, if they cancel) is
+    /// restored into the input editor once the helper's block completes; see
+    /// [`Input::trigger_external_ctrl_r_history_search`] and
+    /// [`Input::set_external_ctrl_r_selection`].
+    ///
+    /// Returns `true` if the handoff was triggered, in which case the caller should not open
+    /// Warp's command search.
+    pub fn maybe_trigger_external_ctrl_r_history_search(
+        &mut self,
+        ctx: &mut ViewContext<Self>,
+    ) -> bool {
+        if !FeatureFlag::FzfCtrlRHandoff.is_enabled() || self.is_long_running() {
+            return false;
+        }
+        let Some(session_id) = self.active_block_session_id() else {
+            return false;
+        };
+        let has_external_ctrl_r_widget =
+            self.sessions
+                .as_ref(ctx)
+                .get(session_id)
+                .is_some_and(|session| {
+                    session
+                        .shell()
+                        .plugins()
+                        .contains(EXTERNAL_CTRL_R_HISTORY_PLUGIN_TAG)
+                });
+        if !has_external_ctrl_r_widget || self.model.lock().is_alt_screen_active() {
+            return false;
+        }
+
+        self.input.update(ctx, |input, ctx| {
+            input.trigger_external_ctrl_r_history_search(EXTERNAL_CTRL_R_HELPER_COMMAND, ctx)
+        })
+    }
+
     /// Returns `true` when an interactive SSH command has been detected at
     /// preexec and the SSH block is still running (long-running). Used by
     /// the workspace to derive `PendingRemoteSession` without storing
@@ -12918,6 +12972,11 @@ impl TerminalView {
                 } else {
                     log::warn!("Got a FinishUpdate event with non-matching update id!");
                 }
+            }
+            ModelEvent::ExternalCtrlRSelection(data) => {
+                self.input.update(ctx, |input, _ctx| {
+                    input.set_external_ctrl_r_selection(&data.buffer);
+                });
             }
             ModelEvent::SelectedTextChanged => {
                 ctx.emit(Event::SelectedTextChanged);

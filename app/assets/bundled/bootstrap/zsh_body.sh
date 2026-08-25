@@ -673,6 +673,33 @@ if [[ -z $WARP_BOOTSTRAPPED ]]; then
   }
   zle -N warp_report_input
 
+  # Runs the shell's own ctrl-r history widget (fzf or atuin, per the widget name captured in
+  # $_WARP_EXTERNAL_CTRL_R_WIDGET during bootstrap) as a synthetic foreground command, so Warp's
+  # existing long-running-command machinery hides the input editor and forwards keystrokes to the
+  # widget's PTY-driven UI. Reports the selected command (or an empty buffer, if cancelled) via
+  # the ExternalCtrlRSelection hook so Warp can insert it into the input editor without executing
+  # it.
+  #
+  # We re-run each tool's own underlying picker command rather than invoking its zle widget
+  # directly: those widgets rely on zle builtins (e.g. `zle vi-fetch-history`) that only work when
+  # the widget is actually bound to a key and invoked through zle, not when called as a plain
+  # command outside of that context.
+  function warp_run_external_ctrl_r_widget () {
+    local result=""
+    case "$_WARP_EXTERNAL_CTRL_R_WIDGET" in
+      *fzf*)
+        result="$(fc -rl 1 \
+          | command -p awk '{ cmd=$0; sub(/^[ \t]*[0-9]+\**[ \t]+/, "", cmd); if (!seen[cmd]++) print cmd }' \
+          | fzf --scheme=history --tiebreak=index +m)"
+        ;;
+      *atuin*)
+        result="$(atuin search -i)"
+        ;;
+    esac
+    local warp_escaped_selection="$(warp_escape_json "$result")"
+    warp_send_json_message "{ \"hook\": \"ExternalCtrlRSelection\", \"value\": { \"buffer\": \"$warp_escaped_selection\", \"session_id\": $WARP_SESSION_ID } }"
+  }
+
   function clear() {
       warp_send_json_message "{\"hook\": \"Clear\", \"value\": {\"session_id\": $WARP_SESSION_ID}}"
   }
@@ -1242,7 +1269,10 @@ esac
   # See https://zsh.sourceforge.io/Doc/Release/Functions.html for more context
   # on the zshaddhistory hook.
   _warp_zshaddhistory() {
-    _is_warp_generator_command "$1"
+    # Also exclude the ctrl-r external history handoff helper (see
+    # warp_run_external_ctrl_r_widget above): it's a Warp-internal invocation, not a command
+    # the user meant to run again later.
+    _is_warp_generator_command "$1" && [[ "$1" != *"warp_run_external_ctrl_r_widget"* ]]
   }
 
   # Register this zshaddhistory hook after the user's RC files have been sourced,
@@ -1314,6 +1344,28 @@ esac
   # Check if the zsh-vi-mode plugin is being used.
   elif [[ ${precmd_functions[(I)zvm_init]} != 0 ]]; then
     shell_plugins+=(vi)
+  fi
+
+  # Detect whether ctrl-r has been rebound away from zsh's default reverse
+  # history search widgets (e.g. by fzf or atuin), so Warp can hand ctrl-r off
+  # to that widget at an idle prompt instead of opening Warp's own command
+  # search. Detection is intentionally generic -- any non-default widget --
+  # rather than an allowlist of known tool names, so other ctrl-r history
+  # tools ride along for free. The widget name itself is only used locally
+  # (by warp_run_external_ctrl_r_widget below); only the generic tag is sent
+  # to the client.
+  _WARP_EXTERNAL_CTRL_R_WIDGET=""
+  warp_ctrl_r_binding="$(bindkey -M main '^R' 2>/dev/null)"
+  if [[ "$warp_ctrl_r_binding" == '"^R" '* ]]; then
+    warp_ctrl_r_widget="${warp_ctrl_r_binding#\"^R\" }"
+    case "$warp_ctrl_r_widget" in
+      history-incremental-search-backward|history-incremental-pattern-search-backward|undefined-key)
+        ;;
+      *)
+        _WARP_EXTERNAL_CTRL_R_WIDGET="$warp_ctrl_r_widget"
+        shell_plugins+=(external_ctrl_r_history)
+        ;;
+    esac
   fi
 
   if kernel_name="$(uname)"; then

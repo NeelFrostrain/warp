@@ -69,6 +69,11 @@ pub(super) enum DProtoHook {
     InputBuffer {
         value: InputBufferValue,
     },
+    /// Reports the command selected in the shell's external ctrl-r history widget (e.g. fzf or
+    /// atuin), so it can be inserted into the input editor. See [`ExternalCtrlRSelectionValue`].
+    ExternalCtrlRSelection {
+        value: ExternalCtrlRSelectionValue,
+    },
     Clear {
         value: ClearValue,
     },
@@ -96,6 +101,7 @@ const DPROTO_HOOK_VARIANTS: &[&str] = &[
     "SSH",
     "InitShell",
     "InputBuffer",
+    "ExternalCtrlRSelection",
     "Clear",
     "InitSubshell",
     "SourcedRcFileForWarp",
@@ -149,6 +155,9 @@ impl<'de> Deserialize<'de> for DProtoHook {
             "InputBuffer" => DProtoHook::InputBuffer {
                 value: parse_hook_value::<_, D::Error>(raw.value)?,
             },
+            "ExternalCtrlRSelection" => DProtoHook::ExternalCtrlRSelection {
+                value: parse_hook_value::<_, D::Error>(raw.value)?,
+            },
             "Clear" => DProtoHook::Clear {
                 value: parse_hook_value::<_, D::Error>(raw.value)?,
             },
@@ -185,6 +194,7 @@ impl DProtoHook {
             DProtoHook::SSH { .. } => "SSH",
             DProtoHook::InitShell { .. } => "InitShell",
             DProtoHook::InputBuffer { .. } => "InputBuffer",
+            DProtoHook::ExternalCtrlRSelection { .. } => "ExternalCtrlRSelection",
             DProtoHook::Clear { .. } => "Clear",
             DProtoHook::InitSubshell { .. } => "InitSubshell",
             DProtoHook::SourcedRcFileForWarp { .. } => "SourcedRcFileForWarp",
@@ -204,6 +214,7 @@ impl DProtoHook {
             DProtoHook::CommandFinished { value } => value.session_id.map(SessionId::from),
             DProtoHook::Bootstrapped { value } => value.session_id.map(SessionId::from),
             DProtoHook::InputBuffer { value } => value.session_id.map(SessionId::from),
+            DProtoHook::ExternalCtrlRSelection { value } => value.session_id.map(SessionId::from),
             DProtoHook::Clear { value } => value.session_id.map(SessionId::from),
             DProtoHook::FinishUpdate { value } => value.session_id.map(SessionId::from),
             DProtoHook::PreInteractiveSSHSession { value } => value.session_id.map(SessionId::from),
@@ -225,6 +236,7 @@ impl DProtoHook {
             | DProtoHook::SSH { .. }
             | DProtoHook::InitShell { .. }
             | DProtoHook::InputBuffer { .. }
+            | DProtoHook::ExternalCtrlRSelection { .. }
             | DProtoHook::Clear { .. }
             | DProtoHook::InitSubshell { .. }
             | DProtoHook::FinishUpdate { .. }
@@ -980,6 +992,17 @@ pub struct SourcedRcFileForWarpValue {
 /// [`TerminalView::request_input_buffer`]).
 #[derive(Debug, Default, PartialEq, Eq, Clone, Deserialize, Serialize)]
 pub struct InputBufferValue {
+    pub buffer: String,
+    #[serde(default)]
+    pub session_id: HookSessionId,
+}
+
+/// Received from the pty after the shell's external ctrl-r history widget (e.g. fzf or atuin,
+/// detected via the `external_ctrl_r_history` [`BootstrappedValue::shell_plugins`] tag) finishes,
+/// reporting the command the user selected. Empty when the user cancelled without selecting
+/// anything. Warp inserts the selection into the input editor without executing it.
+#[derive(Debug, Default, Clone, PartialEq, Eq, Deserialize, Serialize)]
+pub struct ExternalCtrlRSelectionValue {
     pub buffer: String,
     #[serde(default)]
     pub session_id: HookSessionId,

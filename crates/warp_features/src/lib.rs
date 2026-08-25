@@ -975,6 +975,12 @@ pub enum FeatureFlag {
     /// always forwarded unchanged and the harness process/sandbox are never
     /// signaled or torn down.
     CtrlCCancelsThirdPartyHarness,
+
+    /// Prototype: when the active session's shell has rebound `^R` away from its default
+    /// reverse-history-search widget (e.g. to fzf or atuin, detected generically during
+    /// bootstrap and reported via the `external_ctrl_r_history` shell plugin tag), hands
+    /// ctrl-r off to that widget instead of opening Warp's own command search.
+    FzfCtrlRHandoff,
 }
 
 static FLAG_STATES: [AtomicBool; cardinality::<FeatureFlag>()] =
@@ -1049,6 +1055,7 @@ pub const DOGFOOD_FLAGS: &[FeatureFlag] = &[
     FeatureFlag::BoxDrawingGlyphs,
     FeatureFlag::PricingTransparency,
     FeatureFlag::PeriodicHandoffCheckpoints,
+    FeatureFlag::FzfCtrlRHandoff,
 ];
 
 /// Features enabled for feature preview build users (e.g.: Friends of Warp).

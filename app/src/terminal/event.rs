@@ -10,7 +10,7 @@ pub use remote_server::setup::RemoteServerSetupState;
 use warp_util::lazy::Lazy;
 
 use super::history::HistoryEntry;
-use super::model::ansi::FinishUpdateValue;
+use super::model::ansi::{ExternalCtrlRSelectionValue, FinishUpdateValue};
 use super::model::block::BlockId;
 use super::model::lifecycle::LifecycleRecoveryRecord;
 use super::model::session::{SessionId, SessionInfo};
@@ -130,6 +130,9 @@ pub enum Event {
     /// Emitted when the assisted auto-update has completed and we're ready to
     /// relaunch the app.
     FinishUpdate(FinishUpdateValue),
+    /// Emitted when the shell reports the command selected in its external ctrl-r history
+    /// widget (e.g. fzf or atuin).
+    ExternalCtrlRSelection(ExternalCtrlRSelectionValue),
     TextSelectionChanged,
     ShellSpawned(ShellType),
     SendCompletionsPrompt,
@@ -532,6 +535,9 @@ impl Debug for Event {
                 )
             }
             Event::FinishUpdate(data) => write!(f, "FinishUpdate({})", data.update_id),
+            Event::ExternalCtrlRSelection(data) => {
+                write!(f, "ExternalCtrlRSelection(buffer: {:?})", data.buffer)
+            }
             Event::TextSelectionChanged => write!(f, "TextSelectionChanged"),
             Event::ShellSpawned(shell_type) => write!(f, "ShellSpawned({shell_type:?})"),
             Event::SendCompletionsPrompt => write!(f, "SendCompletionsPrompt"),

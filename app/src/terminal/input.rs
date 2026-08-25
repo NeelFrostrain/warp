@@ -1777,6 +1777,12 @@ pub struct Input {
     /// we snapshot the current input contents here so we can restore them after the command
     /// completes and the buffer would normally be cleared.
     input_contents_before_prompt_chip_command: Option<String>,
+
+    /// Buffer contents to restore into the editor once the synthetic command started by
+    /// [`Self::trigger_external_ctrl_r_history_search`] completes and the buffer would
+    /// otherwise be cleared. Initially the buffer the user had before ctrl-r, overwritten with
+    /// the selected command by [`Self::set_external_ctrl_r_selection`] if the user accepts one.
+    pending_ctrl_r_handoff_restore_text: Option<String>,
 }
 
 struct AmbientAgentViewState {
@@ -4022,6 +4028,7 @@ impl Input {
             cloud_mode_composer_slash_command_data_source,
             ephemeral_message_model,
             input_contents_before_prompt_chip_command: None,
+            pending_ctrl_r_handoff_restore_text: None,
         };
 
         #[cfg(feature = "local_fs")]
@@ -7497,6 +7504,34 @@ impl Input {
 
     pub fn try_execute_command(&mut self, command: &str, ctx: &mut ViewContext<Self>) -> bool {
         self.try_execute_command_with_options(command, false, ctx)
+    }
+
+    /// Runs `helper_command` (a bootstrap-installed shell function) as if the user had typed and
+    /// submitted it, having snapshotted the current buffer contents so they're restored once the
+    /// command's block completes -- unless [`Self::set_external_ctrl_r_selection`] supplies a
+    /// selected command in the meantime. Returns `true` if the command was started.
+    pub fn trigger_external_ctrl_r_history_search(
+        &mut self,
+        helper_command: &str,
+        ctx: &mut ViewContext<Self>,
+    ) -> bool {
+        let current_input = self.buffer_text(ctx);
+        let started =
+            self.try_execute_command_from_source(helper_command, CommandExecutionSource::User, ctx);
+        if started {
+            self.pending_ctrl_r_handoff_restore_text = Some(current_input);
+        }
+        started
+    }
+
+    /// Called when the shell reports the command selected in the external ctrl-r history search
+    /// (fzf/atuin). Overrides the buffer text that will be restored when the synthetic command's
+    /// block completes, so the selection lands in the editor instead of the pre-ctrl-r buffer.
+    /// A no-op if `selection` is empty (the user cancelled without selecting anything).
+    pub fn set_external_ctrl_r_selection(&mut self, selection: &str) {
+        if !selection.is_empty() {
+            self.pending_ctrl_r_handoff_restore_text = Some(selection.to_string());
+        }
     }
 
     fn try_execute_command_with_options(
@@ -15235,8 +15270,12 @@ impl Input {
                 && !cloud_setup_pre_first_exchange
                 && !self.has_queued_command_in_flight(ctx);
             let latest_block_id = self.model.lock().block_list().active_block_id().clone();
-            let input_contents_before_prompt_chip_command =
-                self.input_contents_before_prompt_chip_command.take();
+            // Prefer a prompt-chip restore (e.g. `cd`) over a ctrl-r handoff restore; the two
+            // cannot both be pending for the same block in practice.
+            let pending_input_restore = self
+                .input_contents_before_prompt_chip_command
+                .take()
+                .or_else(|| self.pending_ctrl_r_handoff_restore_text.take());
 
             if should_clear_buffer {
                 // We want to reinitialize the buffer whenever a command is completed so that
@@ -15247,9 +15286,10 @@ impl Input {
                         .update(ctx, |editor, ctx| editor.reinitialize_buffer(None, ctx));
                     self.latest_buffer_operations = Vec::new();
 
-                    // If we have a pending input restore (from a prompt chip command like cd),
-                    // restore the input contents instead of leaving the buffer empty.
-                    if let Some(restore_text) = input_contents_before_prompt_chip_command {
+                    // If we have a pending input restore (from a prompt chip command like cd, or
+                    // a ctrl-r external history handoff), restore the input contents instead of
+                    // leaving the buffer empty.
+                    if let Some(restore_text) = pending_input_restore {
                         self.editor.update(ctx, |editor, ctx| {
                             editor.set_buffer_text(&restore_text, ctx);
                         });

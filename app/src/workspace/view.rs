@@ -17276,6 +17276,19 @@ impl Workspace {
             return;
         }
 
+        // If the active session's shell has rebound ctrl-r away from its default history
+        // search (e.g. to fzf or atuin), hand the keypress off to that widget instead of
+        // opening command search. Only applies to the default (ctrl-r-shaped) invocation, not
+        // the dedicated history-search binding, which explicitly asks for Warp's own UI.
+        if query_filter.is_none()
+            && let Some(terminal_view_handle) = self.active_session_view(ctx)
+            && terminal_view_handle.update(ctx, |terminal_view, ctx| {
+                terminal_view.maybe_trigger_external_ctrl_r_history_search(ctx)
+            })
+        {
+            return;
+        }
+
         // Close all overlays including chip menus before opening command search
         self.close_all_overlays(ctx);
 
