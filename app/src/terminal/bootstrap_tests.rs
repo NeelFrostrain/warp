@@ -106,6 +106,11 @@ fish_should_add_to_history "echo normal"
 echo "normal:$status"
 fish_should_add_to_history "warp_run_external_ctrl_r_widget token"
 echo "helper:$status"
+# The real invocation (see trigger_external_ctrl_r_history_search) is prefixed with a leading
+# space, so atuin's own "ignorespace" exclusion also catches it; the wrapper must still reject
+# this exact shape too.
+fish_should_add_to_history " warp_run_external_ctrl_r_widget token"
+echo "helper_leading_space:$status"
 "#
     );
     let Some(stdout) = run_fish(&script) else {
@@ -113,6 +118,7 @@ echo "helper:$status"
     };
     assert!(stdout.contains("normal:0"), "{stdout}");
     assert!(stdout.contains("helper:1"), "{stdout}");
+    assert!(stdout.contains("helper_leading_space:1"), "{stdout}");
 }
 
 #[test]

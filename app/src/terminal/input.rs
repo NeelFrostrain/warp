@@ -7550,6 +7550,15 @@ impl Input {
     /// the current buffer contents so they're restored once the command's block completes --
     /// unless [`Self::set_external_ctrl_r_selection`] supplies a selected command in the
     /// meantime. Returns `true` if the command was started.
+    ///
+    /// The command is prefixed with a leading space, honoring the "ignorespace" convention that
+    /// bash/zsh support and atuin explicitly implements itself (independent of the shell's own
+    /// history settings -- see atuin's docs on excluding commands). Our own per-shell exclusions
+    /// (zsh's `_warp_zshaddhistory`, bash's `HISTIGNORE`, fish's `fish_should_add_to_history`
+    /// wrapper) only ever stopped the *shell's* history file from recording this invocation.
+    /// atuin records through its own preexec hook straight into its own database, which none of
+    /// that touches, so without this it would otherwise show up in the very history list this
+    /// feature exists to search.
     pub fn trigger_external_ctrl_r_history_search(
         &mut self,
         helper_command: &str,
@@ -7561,7 +7570,7 @@ impl Input {
         let current_input = self.buffer_text(ctx);
         let block_id = self.model.lock().block_list().active_block_id().clone();
         let token = Uuid::new_v4().to_string();
-        let command = format!("{helper_command} {token}");
+        let command = format!(" {helper_command} {token}");
         let started =
             self.try_execute_command_from_source(&command, CommandExecutionSource::User, ctx);
         if started {

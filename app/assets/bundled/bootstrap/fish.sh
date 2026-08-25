@@ -617,7 +617,10 @@ else if not functions -q warp_original_fish_should_add_to_history
   end
 end
 function fish_should_add_to_history
-  string match --quiet -- 'warp_run_external_ctrl_r_widget *' $argv[1]; and return 1
+  # Unanchored (not just a prefix match): the invocation is now given a leading space so atuin's
+  # own "ignorespace" exclusion also catches it (see trigger_external_ctrl_r_history_search), and
+  # that space must not defeat this match too.
+  string match --quiet -- '*warp_run_external_ctrl_r_widget *' $argv[1]; and return 1
   warp_original_fish_should_add_to_history $argv
 end
 
