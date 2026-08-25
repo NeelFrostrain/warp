@@ -1,11 +1,13 @@
-//! The "Conversation" usage popover (pricing-transparency Surfaces 1, 2, 4,
+//! The "Conversation" usage popover (pricing-transparency Surfaces 1, 2,
 //! 6): a click-triggered floating popover anchored to the footer's usage
 //! icon (Surface 1) that replaces the collapsed-inline usage footer with a
-//! richer breakdown: a per-model stacked bar with role pill badges
-//! (Surface 2), a segmented context-window breakdown (Surface 4), and — when
-//! the conversation is an orchestrator with locally-loaded descendants — a
-//! per-agent stacked-bar rollup in place of the per-model section
-//! (Surface 6).
+//! richer breakdown: a per-model stacked bar with role pill badges and
+//! per-model dollar costs (Surface 2), and — when the conversation is an
+//! orchestrator with locally-loaded descendants — a per-agent stacked-bar
+//! rollup in place of the per-model section (Surface 6).
+//!
+//! The context-window breakdown (originally Surface 4) has moved to its own
+//! separately-triggered surface and is not rendered here.
 //!
 //! Unlike [`super::conversation_usage_view::ConversationUsageView`] (which
 //! renders inline in the block list and remains the production
@@ -23,6 +25,7 @@
 //! (matching the existing per-block pill's live-update behavior).
 
 use std::cmp::Ordering;
+use std::collections::HashMap;
 
 use pathfinder_color::ColorU;
 use warp_core::ui::Icon;
@@ -40,15 +43,15 @@ use crate::ai::blocklist::BlocklistAIHistoryModel;
 use crate::ai::blocklist::agent_view::orchestration_pill_bar::{
     render_agent_avatar_disc, render_orchestrator_avatar_disc,
 };
-use crate::ai::blocklist::usage::colors::{color_for_context_window_category, color_for_model};
+use crate::ai::blocklist::usage::colors::color_for_model;
 use crate::ai::blocklist::usage::rollup::{
     AgentAvatar, OrchestrationCreditRollup, PerAgentCreditEntry, compute_orchestration_rollup,
 };
 use crate::ai::blocklist::view_util::{format_credits, format_credits_with_cost};
 use crate::appearance::Appearance;
+use crate::features::FeatureFlag;
 use crate::persistence::model::{
-    ContextWindowSegment, ContextWindowSegmentType, FULL_TERMINAL_USE_CATEGORY, ModelTokenUsage,
-    PRIMARY_AGENT_CATEGORY,
+    FULL_TERMINAL_USE_CATEGORY, ModelTokenUsage, PRIMARY_AGENT_CATEGORY,
 };
 use crate::settings_view::SettingsSection;
 use crate::ui_components::blended_colors;
@@ -68,7 +71,6 @@ const SWATCH_SIZE: f32 = 8.;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum UsagePopoverAction {
     ToggleModelUsageSection,
-    ToggleContextWindowSection,
     ToggleToolCallSummarySection,
     ToggleResponseTimeSection,
     ShowAllRollupAgents,
@@ -96,12 +98,10 @@ fn space_between_row() -> Flex {
 pub struct UsagePopoverView {
     conversation_id: AIConversationId,
     model_usage_section_expanded: bool,
-    context_window_section_expanded: bool,
     tool_call_summary_section_expanded: bool,
     response_time_section_expanded: bool,
     rollup_show_all: bool,
     model_usage_toggle_mouse_state: MouseStateHandle,
-    context_window_toggle_mouse_state: MouseStateHandle,
     tool_call_summary_toggle_mouse_state: MouseStateHandle,
     response_time_toggle_mouse_state: MouseStateHandle,
     show_more_mouse_state: MouseStateHandle,
@@ -114,16 +114,12 @@ impl UsagePopoverView {
         Self {
             conversation_id,
             // All sections default to expanded, matching the "rev" Figma
-            // proposals (Surface 2 spec §5) and Surface 4's context-window
-            // panel, which is shown fully open with no collapse affordance
-            // drawn in Figma at all.
+            // proposals (Surface 2 spec §5).
             model_usage_section_expanded: true,
-            context_window_section_expanded: true,
             tool_call_summary_section_expanded: true,
             response_time_section_expanded: true,
             rollup_show_all: false,
             model_usage_toggle_mouse_state: MouseStateHandle::default(),
-            context_window_toggle_mouse_state: MouseStateHandle::default(),
             tool_call_summary_toggle_mouse_state: MouseStateHandle::default(),
             response_time_toggle_mouse_state: MouseStateHandle::default(),
             show_more_mouse_state: MouseStateHandle::default(),
@@ -187,7 +183,7 @@ impl UsagePopoverView {
             .finish()
     }
 
-    /// "Credits spent" summary row shown above the model/agent usage
+    /// "Total Usage" summary row shown above the model/agent usage
     /// section, using the orchestration rollup total when one applies.
     fn render_credits_summary_row(
         &self,
@@ -222,7 +218,7 @@ impl UsagePopoverView {
         space_between_row()
             .with_child(
                 Text::new(
-                    "Credits spent".to_string(),
+                    "Total Usage".to_string(),
                     appearance.ui_font_family(),
                     font_size,
                 )
@@ -308,9 +304,7 @@ impl UsagePopoverView {
                 appearance,
             ));
             if self.model_usage_section_expanded {
-                column.add_child(
-                    self.render_model_usage_rows(conversation.token_usage(), appearance),
-                );
+                column.add_child(self.render_model_usage_rows(conversation, appearance));
             }
         }
         column.finish()
@@ -318,10 +312,18 @@ impl UsagePopoverView {
 
     fn render_model_usage_rows(
         &self,
-        models: &[ModelTokenUsage],
+        conversation: &AIConversation,
         appearance: &Appearance,
     ) -> Box<dyn Element> {
-        let rows = model_usage_rows(models);
+        // Token counts (with role-category info for the badges) and
+        // per-model dollar cost come from two different underlying
+        // structures, so join them here by model id.
+        let costs_by_model: HashMap<String, f32> = conversation
+            .total_token_usage()
+            .into_iter()
+            .map(|usage| (usage.model_id, usage.cost_in_cents))
+            .collect();
+        let rows = model_usage_rows(conversation.token_usage(), &costs_by_model);
         if rows.is_empty() {
             return Empty::new().finish();
         }
@@ -332,7 +334,10 @@ impl UsagePopoverView {
 
         let mut column = Flex::column().with_spacing(6.);
 
-        // "All models" summary row.
+        // "All models" summary row. Uses the conversation-wide cost total
+        // (the same source as the header's "Total Usage" row) rather than
+        // re-summing per-model costs, so the two always agree even if a
+        // model's cost hasn't been individually attributed yet.
         column.add_child(
             space_between_row()
                 .with_child(
@@ -346,7 +351,10 @@ impl UsagePopoverView {
                 )
                 .with_child(
                     Text::new(
-                        format!("{} tokens", format_token_count(total_tokens)),
+                        format_tokens_with_cost(
+                            total_tokens,
+                            conversation.usage_totals().cost_in_cents,
+                        ),
                         appearance.ui_font_family(),
                         font_size,
                     )
@@ -410,7 +418,7 @@ impl UsagePopoverView {
         }
 
         let value = Text::new(
-            format!("{} tokens", format_token_count(row.tokens)),
+            format_tokens_with_cost(row.tokens, row.cost_in_cents),
             appearance.ui_font_family(),
             font_size,
         )
@@ -562,122 +570,6 @@ impl UsagePopoverView {
         )
     }
 
-    fn render_context_window_section(
-        &self,
-        conversation: &AIConversation,
-        appearance: &Appearance,
-    ) -> Box<dyn Element> {
-        let rows = context_window_display_rows(
-            conversation.context_window_usage(),
-            conversation.context_window_segments(),
-        );
-        if rows.is_empty() {
-            return Empty::new().finish();
-        }
-
-        let theme = appearance.theme();
-        let background = theme.surface_2();
-        let font_size = appearance.ui_font_size();
-        let remaining_pct = ((1. - conversation.context_window_usage()) * 100.).round();
-        let used_tokens: u64 = rows.iter().map(|r| r.token_count as u64).sum();
-
-        let mut column = Flex::column().with_spacing(8.);
-        column.add_child(self.render_section_header(
-            "CONTEXT WINDOW",
-            self.context_window_section_expanded,
-            self.context_window_toggle_mouse_state.clone(),
-            UsagePopoverAction::ToggleContextWindowSection,
-            appearance,
-        ));
-
-        if !self.context_window_section_expanded {
-            return column.finish();
-        }
-
-        let mut inner = Flex::column().with_spacing(6.);
-        inner.add_child(
-            space_between_row()
-                .with_child(
-                    Text::new(
-                        format!("{} tokens used", format_token_count(used_tokens)),
-                        appearance.ui_font_family(),
-                        font_size,
-                    )
-                    .with_color(blended_colors::text_sub(theme, background))
-                    .finish(),
-                )
-                .with_child(
-                    Text::new(
-                        format!("{remaining_pct}% remaining"),
-                        appearance.ui_font_family(),
-                        font_size,
-                    )
-                    .with_color(blended_colors::text_main(theme, background))
-                    .finish(),
-                )
-                .finish(),
-        );
-
-        let segments: Vec<(ColorU, f32)> = rows
-            .iter()
-            .map(|row| (color_for_context_window_category(row.bucket), row.pct))
-            .collect();
-        inner.add_child(render_segmented_bar(
-            &segments,
-            theme.outline().into_solid(),
-        ));
-
-        for row in &rows {
-            inner.add_child(self.render_context_window_row(row, appearance));
-        }
-
-        column.add_child(inner.finish());
-        column.finish()
-    }
-
-    fn render_context_window_row(
-        &self,
-        row: &ContextWindowDisplayRow,
-        appearance: &Appearance,
-    ) -> Box<dyn Element> {
-        let theme = appearance.theme();
-        let background = theme.surface_2();
-        let font_size = appearance.ui_font_size();
-        let color = color_for_context_window_category(row.bucket);
-
-        let left = Flex::row()
-            .with_cross_axis_alignment(CrossAxisAlignment::Center)
-            .with_spacing(7.)
-            .with_child(render_swatch(color))
-            .with_child(
-                Text::new(
-                    row.bucket.context_window_panel_label().to_string(),
-                    appearance.ui_font_family(),
-                    font_size,
-                )
-                .with_color(blended_colors::text_main(theme, background))
-                .finish(),
-            )
-            .finish();
-
-        let value = Text::new(
-            format!(
-                "{} / {:.1}%",
-                format_token_count(row.token_count as u64),
-                row.pct
-            ),
-            appearance.ui_font_family(),
-            font_size,
-        )
-        .with_color(blended_colors::text_sub(theme, background))
-        .finish();
-
-        space_between_row()
-            .with_child(left)
-            .with_child(value)
-            .finish()
-    }
-
     fn render_tool_call_summary_section(
         &self,
         conversation: &AIConversation,
@@ -796,7 +688,6 @@ impl View for UsagePopoverView {
             rollup.as_ref(),
             appearance,
         ));
-        column.add_child(self.render_context_window_section(conversation, appearance));
         column.add_child(self.render_tool_call_summary_section(conversation, appearance));
         column.add_child(self.render_response_time_section(conversation, appearance));
 
@@ -826,10 +717,6 @@ impl TypedActionView for UsagePopoverView {
                 self.model_usage_section_expanded = !self.model_usage_section_expanded;
                 ctx.notify();
             }
-            UsagePopoverAction::ToggleContextWindowSection => {
-                self.context_window_section_expanded = !self.context_window_section_expanded;
-                ctx.notify();
-            }
             UsagePopoverAction::ToggleToolCallSummarySection => {
                 self.tool_call_summary_section_expanded = !self.tool_call_summary_section_expanded;
                 ctx.notify();
@@ -852,17 +739,24 @@ impl TypedActionView for UsagePopoverView {
 
 /// One row of the per-model usage breakdown, aggregated across a model's
 /// warp/byok/custom-endpoint token counts. Role badges mirror the existing
-/// credits-based breakdown's category constants.
+/// credits-based breakdown's category constants. `cost_in_cents` comes from
+/// a separate per-model cost structure (`AIConversation::total_token_usage`)
+/// joined in by model id, since the token/category source
+/// (`AIConversation::token_usage`) doesn't carry cost.
 struct ModelUsageRow {
     model_id: String,
     role_badge: Option<&'static str>,
     tokens: u64,
+    cost_in_cents: Option<f32>,
 }
 
 /// Builds the sorted per-model row list from raw per-conversation token
 /// usage. Rows are ordered primary-agent-first (matching the existing
 /// credits-based breakdown's sort), then alphabetically by model id.
-fn model_usage_rows(models: &[ModelTokenUsage]) -> Vec<ModelUsageRow> {
+fn model_usage_rows(
+    models: &[ModelTokenUsage],
+    costs_by_model: &HashMap<String, f32>,
+) -> Vec<ModelUsageRow> {
     let mut rows: Vec<ModelUsageRow> = models
         .iter()
         .filter_map(|model| {
@@ -877,6 +771,7 @@ fn model_usage_rows(models: &[ModelTokenUsage]) -> Vec<ModelUsageRow> {
                 model_id: model.model_id.clone(),
                 role_badge,
                 tokens,
+                cost_in_cents: costs_by_model.get(&model.model_id).copied(),
             })
         })
         .collect();
@@ -913,61 +808,6 @@ fn role_badge_for_model(model: &ModelTokenUsage) -> Option<&'static str> {
     }
 }
 
-/// Display row for one context-window breakdown bucket (Surface 4).
-struct ContextWindowDisplayRow {
-    bucket: ContextWindowSegmentType,
-    token_count: u32,
-    pct: f32,
-}
-
-/// Aggregates raw context-window segments into the Surface-4 display
-/// taxonomy (folding `Unknown`/`LatestInput`/`Images` into `Other`),
-/// computes each bucket's percentage of the overall context window, and
-/// sorts descending by percentage with `Other` always last. Buckets that
-/// round to zero are dropped, matching the existing text-only breakdown's
-/// behavior.
-fn context_window_display_rows(
-    context_window_usage: f32,
-    segments: &[ContextWindowSegment],
-) -> Vec<ContextWindowDisplayRow> {
-    let total: u32 = segments.iter().map(|s| s.token_count).sum();
-    if total == 0 || context_window_usage <= 0. {
-        return Vec::new();
-    }
-    let total_f = total as f32;
-
-    let mut by_bucket: std::collections::HashMap<ContextWindowSegmentType, u32> =
-        std::collections::HashMap::new();
-    for segment in segments {
-        if segment.token_count == 0 {
-            continue;
-        }
-        *by_bucket
-            .entry(segment.segment_type.context_window_panel_bucket())
-            .or_default() += segment.token_count;
-    }
-
-    let mut rows: Vec<ContextWindowDisplayRow> = by_bucket
-        .into_iter()
-        .filter_map(|(bucket, token_count)| {
-            let pct = context_window_usage * (token_count as f32) / total_f * 100.;
-            (pct >= 0.05).then_some(ContextWindowDisplayRow {
-                bucket,
-                token_count,
-                pct,
-            })
-        })
-        .collect();
-
-    rows.sort_by(|a, b| match (a.bucket, b.bucket) {
-        (ContextWindowSegmentType::Other, ContextWindowSegmentType::Other) => Ordering::Equal,
-        (ContextWindowSegmentType::Other, _) => Ordering::Greater,
-        (_, ContextWindowSegmentType::Other) => Ordering::Less,
-        _ => b.pct.partial_cmp(&a.pct).unwrap_or(Ordering::Equal),
-    });
-    rows
-}
-
 /// Splits the per-agent rollup list into the rows to render now and the
 /// count still hidden, honoring the truncation cap and "show all" state.
 fn truncate_rollup_rows(
@@ -998,6 +838,22 @@ fn format_token_count(tokens: u64) -> String {
         format!("{:.1}k", tokens as f64 / 1000.)
     } else {
         tokens.to_string()
+    }
+}
+
+/// Formats a token count alongside its dollar cost, e.g. `"9.6k tokens
+/// ($0.36)"`. The cost suffix is omitted when `cost_in_cents` is `None`
+/// (unknown, not zero) or when `FeatureFlag::PricingTransparency` is
+/// disabled, matching the gating used by [`format_credits_with_cost`]
+/// elsewhere in the usage surfaces.
+fn format_tokens_with_cost(tokens: u64, cost_in_cents: Option<f32>) -> String {
+    let token_text = format!("{} tokens", format_token_count(tokens));
+    if !FeatureFlag::PricingTransparency.is_enabled() {
+        return token_text;
+    }
+    match cost_in_cents {
+        Some(cost) => format!("{token_text} (${:.2})", cost / 100.),
+        None => token_text,
     }
 }
 

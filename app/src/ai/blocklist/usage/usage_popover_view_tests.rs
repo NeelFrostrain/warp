@@ -1,5 +1,7 @@
 use std::collections::HashMap;
 
+use warp_core::features::FeatureFlag;
+
 use super::*;
 use crate::ai::agent::conversation::AIConversationId;
 use crate::ai::blocklist::usage::rollup::{AgentAvatar, PerAgentCreditEntry};
@@ -22,7 +24,7 @@ fn model_usage_rows_drops_zero_token_models() {
             ..Default::default()
         },
     ];
-    let rows = model_usage_rows(&models);
+    let rows = model_usage_rows(&models, &HashMap::new());
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].model_id, "gpt-5.5");
 }
@@ -34,7 +36,7 @@ fn model_usage_rows_sorts_primary_agent_first() {
         model("primary-model", 100, PRIMARY_AGENT_CATEGORY),
         model("auto-model", 10, "other_category"),
     ];
-    let rows = model_usage_rows(&models);
+    let rows = model_usage_rows(&models, &HashMap::new());
     assert_eq!(rows[0].model_id, "primary-model");
     assert_eq!(rows[0].role_badge, Some("Primary agent"));
 }
@@ -42,90 +44,29 @@ fn model_usage_rows_sorts_primary_agent_first() {
 #[test]
 fn model_usage_rows_assigns_full_terminal_use_badge() {
     let models = vec![model("codex-model", 50, FULL_TERMINAL_USE_CATEGORY)];
-    let rows = model_usage_rows(&models);
+    let rows = model_usage_rows(&models, &HashMap::new());
     assert_eq!(rows[0].role_badge, Some("Full terminal use"));
 }
 
 #[test]
 fn model_usage_rows_has_no_badge_for_unknown_categories() {
     let models = vec![model("auto-model", 10, "some_other_category")];
-    let rows = model_usage_rows(&models);
+    let rows = model_usage_rows(&models, &HashMap::new());
     assert_eq!(rows[0].role_badge, None);
 }
 
 #[test]
-fn context_window_display_rows_empty_when_no_usage() {
-    assert!(context_window_display_rows(0.0, &[]).is_empty());
-    assert!(
-        context_window_display_rows(
-            0.1,
-            &[ContextWindowSegment {
-                segment_type: ContextWindowSegmentType::SystemPrompt,
-                token_count: 0,
-            }]
-        )
-        .is_empty()
-    );
-}
-
-#[test]
-fn context_window_display_rows_folds_unnamed_segments_into_other() {
-    let segments = vec![
-        ContextWindowSegment {
-            segment_type: ContextWindowSegmentType::LatestInput,
-            token_count: 50,
-        },
-        ContextWindowSegment {
-            segment_type: ContextWindowSegmentType::Images,
-            token_count: 50,
-        },
-        ContextWindowSegment {
-            segment_type: ContextWindowSegmentType::SystemPrompt,
-            token_count: 100,
-        },
+fn model_usage_rows_joins_cost_by_model_id() {
+    let models = vec![
+        model("gpt-5.5", 100, PRIMARY_AGENT_CATEGORY),
+        model("codex-model", 50, FULL_TERMINAL_USE_CATEGORY),
     ];
-    let rows = context_window_display_rows(0.1, &segments);
-    let other_row = rows
-        .iter()
-        .find(|r| r.bucket == ContextWindowSegmentType::Other)
-        .expect("Other bucket should exist");
-    assert_eq!(other_row.token_count, 100);
-}
-
-#[test]
-fn context_window_display_rows_sorts_other_last() {
-    let segments = vec![
-        ContextWindowSegment {
-            segment_type: ContextWindowSegmentType::Other,
-            token_count: 1000,
-        },
-        ContextWindowSegment {
-            segment_type: ContextWindowSegmentType::SystemPrompt,
-            token_count: 10,
-        },
-    ];
-    let rows = context_window_display_rows(0.5, &segments);
-    assert_eq!(rows.last().unwrap().bucket, ContextWindowSegmentType::Other);
-}
-
-#[test]
-fn context_window_display_rows_percentages_sum_to_overall_usage() {
-    let segments = vec![
-        ContextWindowSegment {
-            segment_type: ContextWindowSegmentType::SystemPrompt,
-            token_count: 25,
-        },
-        ContextWindowSegment {
-            segment_type: ContextWindowSegmentType::Rules,
-            token_count: 75,
-        },
-    ];
-    let rows = context_window_display_rows(0.2, &segments);
-    let total_pct: f32 = rows.iter().map(|r| r.pct).sum();
-    assert!(
-        (total_pct - 20.0).abs() < 0.01,
-        "expected ~20%, got {total_pct}"
-    );
+    let costs = HashMap::from([("gpt-5.5".to_string(), 36.0)]);
+    let rows = model_usage_rows(&models, &costs);
+    let gpt_row = rows.iter().find(|r| r.model_id == "gpt-5.5").unwrap();
+    let codex_row = rows.iter().find(|r| r.model_id == "codex-model").unwrap();
+    assert_eq!(gpt_row.cost_in_cents, Some(36.0));
+    assert_eq!(codex_row.cost_in_cents, None);
 }
 
 fn per_agent_entry(name: &str, credits: f32) -> PerAgentCreditEntry {
@@ -166,4 +107,28 @@ fn format_token_count_abbreviates_above_1000() {
     assert_eq!(format_token_count(500), "500");
     assert_eq!(format_token_count(9600), "9.6k");
     assert_eq!(format_token_count(1000), "1.0k");
+}
+
+#[test]
+fn format_tokens_with_cost_omits_dollar_suffix_when_flag_disabled() {
+    let _flag = FeatureFlag::PricingTransparency.override_enabled(false);
+
+    assert_eq!(format_tokens_with_cost(9600, Some(36.0)), "9.6k tokens");
+}
+
+#[test]
+fn format_tokens_with_cost_appends_dollar_suffix_when_flag_enabled() {
+    let _flag = FeatureFlag::PricingTransparency.override_enabled(true);
+
+    assert_eq!(
+        format_tokens_with_cost(9600, Some(36.0)),
+        "9.6k tokens ($0.36)"
+    );
+}
+
+#[test]
+fn format_tokens_with_cost_omits_dollar_suffix_when_cost_is_unknown() {
+    let _flag = FeatureFlag::PricingTransparency.override_enabled(true);
+
+    assert_eq!(format_tokens_with_cost(9600, None), "9.6k tokens");
 }
