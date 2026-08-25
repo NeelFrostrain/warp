@@ -597,19 +597,23 @@ end
 # uses for fish_prompt.
 #
 # warp_original_fish_should_add_to_history must exist and be safe to call *before* we install our
-# own wrapper below, and this must happen only once: this bootstrap script can run more than once
-# in the same fish process (a shell reload, or a nested fish subshell), and on a second run
-# fish_should_add_to_history is already our own wrapper, not the user's. Backing that up as if it
-# were the original would make every history check call itself. Establishing the backup here,
-# before the wrapper is (re-)installed, and only when no backup exists yet, keeps the backup
-# always pointing at either the user's real function or a default that accepts everything.
-if not functions -q warp_original_fish_should_add_to_history
-  if functions -q fish_should_add_to_history
-    functions -c fish_should_add_to_history warp_original_fish_should_add_to_history
-  else
-    function warp_original_fish_should_add_to_history
-      return 0
-    end
+# own wrapper below. This bootstrap script can run more than once in the same fish process (a
+# shell reload, or a nested fish subshell), and a user or plugin can define or replace
+# fish_should_add_to_history at any point, including between two of our sourcings -- so on every
+# run, re-derive the backup from whatever fish_should_add_to_history currently is, unless that's
+# already our own wrapper from a previous run (identified by the warp_run_external_ctrl_r_widget
+# sentinel in its body), in which case the existing backup -- the last real hook we captured, or
+# the accept-everything default if none ever existed -- is left alone. Backing up our own wrapper
+# as if it were the original would make every history check call itself.
+if functions -q fish_should_add_to_history
+  and not functions fish_should_add_to_history | string match --quiet -- '*warp_run_external_ctrl_r_widget*'
+  # `functions -c` refuses to overwrite an existing destination, so erase any previous backup
+  # (e.g. an earlier accept-everything default, or a now-stale hook) before capturing this one.
+  functions -q warp_original_fish_should_add_to_history; and functions -e warp_original_fish_should_add_to_history
+  functions -c fish_should_add_to_history warp_original_fish_should_add_to_history
+else if not functions -q warp_original_fish_should_add_to_history
+  function warp_original_fish_should_add_to_history
+    return 0
   end
 end
 function fish_should_add_to_history

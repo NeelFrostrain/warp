@@ -65,7 +65,7 @@ fn decode_script(bytes: &[u8]) -> &str {
 
 fn fish_history_wrapper_installer() -> &'static str {
     const FISH_SH: &str = include_str!("../../assets/bundled/bootstrap/fish.sh");
-    let start_marker = "if not functions -q warp_original_fish_should_add_to_history";
+    let start_marker = "if functions -q fish_should_add_to_history\n  and not functions fish_should_add_to_history";
     let end_marker = "  warp_original_fish_should_add_to_history $argv\nend";
     let start = FISH_SH
         .find(start_marker)
@@ -125,6 +125,37 @@ function fish_should_add_to_history
   return 0
 end
 {installer}
+{installer}
+fish_should_add_to_history "echo normal"
+echo "normal:$status"
+fish_should_add_to_history "warp_run_external_ctrl_r_widget token"
+echo "helper:$status"
+fish_should_add_to_history "user_excluded"
+echo "user:$status"
+"#
+    );
+    let Some(stdout) = run_fish(&script) else {
+        return;
+    };
+    assert!(stdout.contains("normal:0"), "{stdout}");
+    assert!(stdout.contains("helper:1"), "{stdout}");
+    assert!(stdout.contains("user:1"), "{stdout}");
+}
+
+/// Regression test for a user/plugin hook defined *between* two sourcings of this bootstrap
+/// script (e.g. a plugin loaded after Warp's shell integration, followed by a shell reload or
+/// nested fish subshell): the second sourcing must capture that hook rather than discarding it
+/// in favor of whatever backup (or accept-everything default) an earlier sourcing installed.
+#[test]
+fn test_fish_history_wrapper_captures_hook_installed_between_resourcing() {
+    let installer = fish_history_wrapper_installer();
+    let script = format!(
+        r#"
+{installer}
+function fish_should_add_to_history
+  string match --quiet -- "user_excluded*" $argv[1]; and return 1
+  return 0
+end
 {installer}
 fish_should_add_to_history "echo normal"
 echo "normal:$status"
