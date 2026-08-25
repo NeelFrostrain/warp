@@ -2185,7 +2185,9 @@ pub fn init(app: &mut AppContext) {
             "External File Search",
             WorkspaceAction::TriggerExternalCtrlTFileSearch,
         )
-        .with_context_predicate(id!("Input") & !id!("VoltronActive"))
+        .with_context_predicate(
+            id!("Input") & !id!("VoltronActive") & !id!("LongRunningCommand"),
+        )
         .with_key_binding("ctrl-t"),
     ]);
 

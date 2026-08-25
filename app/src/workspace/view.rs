@@ -402,6 +402,7 @@ use crate::terminal::ligature_settings::should_use_ligature_rendering;
 #[cfg(feature = "local_tty")]
 use crate::terminal::local_tty::docker_sandbox::resolve_sbx_path_from_user_shell;
 use crate::terminal::model::blockgrid::BlockGrid;
+use crate::terminal::model::escape_sequences::C0;
 #[cfg(feature = "local_fs")]
 use crate::terminal::model::session::Session;
 use crate::terminal::model::session::SessionId;
@@ -17367,15 +17368,19 @@ impl Workspace {
     }
 
     /// If the active session's shell has rebound ctrl-t to an external file-search widget
-    /// (e.g. fzf), hands the keypress off to it. A no-op otherwise -- unlike
-    /// [`Self::show_command_search`], ctrl-t has no Warp-native UI to fall back to.
+    /// (e.g. fzf), hands the keypress off to it. Unlike [`Self::show_command_search`], ctrl-t
+    /// has no Warp-native UI to fall back to, so when the handoff doesn't trigger (feature
+    /// off, no matching shell plugin, alt-screen active, or the helper failed to start), the
+    /// raw keystroke is forwarded to the pty instead of being swallowed.
     fn trigger_external_ctrl_t_file_search(&mut self, ctx: &mut ViewContext<Self>) {
         if self.is_readonly_shared_session_active(ctx) {
             return;
         }
         if let Some(terminal_view_handle) = self.active_session_view(ctx) {
             terminal_view_handle.update(ctx, |terminal_view, ctx| {
-                terminal_view.maybe_trigger_external_ctrl_t_file_search(ctx);
+                if !terminal_view.maybe_trigger_external_ctrl_t_file_search(ctx) {
+                    terminal_view.write_user_bytes_to_pty(vec![C0::DC4], ctx);
+                }
             });
         }
     }

@@ -9576,7 +9576,7 @@ impl TerminalView {
     /// Also calls logic to emit a sync event. Returns whether the bytes were
     /// actually forwarded to the PTY: `false` when the active block is under
     /// agent control, in which case nothing is written.
-    fn write_user_bytes_to_pty<B: Into<Cow<'static, [u8]>>>(
+    pub(crate) fn write_user_bytes_to_pty<B: Into<Cow<'static, [u8]>>>(
         &mut self,
         data: B,
         ctx: &mut ViewContext<Self>,

@@ -1490,8 +1490,15 @@ esac
       warp_ctrl_t_binding="$(bind -X 2>/dev/null | command -p sed -n 's/^"\\C-t": "\(.*\)"$/\1/p')"
       case "$warp_ctrl_t_binding" in
         fzf-file-widget)
-          _WARP_EXTERNAL_CTRL_T_WIDGET="$warp_ctrl_t_binding"
-          shell_plugins+=(external_ctrl_t_file)
+          # The bind -X entry has stayed "fzf-file-widget" across fzf versions, but only tag/
+          # intercept when the picker warp_run_external_ctrl_t_widget actually calls
+          # (__fzf_select__) exists -- a version mismatch here would otherwise claim ctrl-t and
+          # then have nothing to call, swallowing the key with no picker shown instead of
+          # leaving ctrl-t alone.
+          if declare -F __fzf_select__ >/dev/null; then
+            _WARP_EXTERNAL_CTRL_T_WIDGET="$warp_ctrl_t_binding"
+            shell_plugins+=(external_ctrl_t_file)
+          fi
           ;;
       esac
     fi
