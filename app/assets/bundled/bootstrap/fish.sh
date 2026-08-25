@@ -595,12 +595,26 @@ end
 # user-defined one -- e.g. from a plugin sourced in config.fish before this bootstrap script
 # runs -- rather than clobbering it, following the same backup pattern warp_update_prompt_vars
 # uses for fish_prompt.
-if functions -q fish_should_add_to_history; and not functions -q warp_original_fish_should_add_to_history
-  functions -c fish_should_add_to_history warp_original_fish_should_add_to_history
+#
+# warp_original_fish_should_add_to_history must exist and be safe to call *before* we install our
+# own wrapper below, and this must happen only once: this bootstrap script can run more than once
+# in the same fish process (a shell reload, or a nested fish subshell), and on a second run
+# fish_should_add_to_history is already our own wrapper, not the user's. Backing that up as if it
+# were the original would make every history check call itself. Establishing the backup here,
+# before the wrapper is (re-)installed, and only when no backup exists yet, keeps the backup
+# always pointing at either the user's real function or a default that accepts everything.
+if not functions -q warp_original_fish_should_add_to_history
+  if functions -q fish_should_add_to_history
+    functions -c fish_should_add_to_history warp_original_fish_should_add_to_history
+  else
+    function warp_original_fish_should_add_to_history
+      return 0
+    end
+  end
 end
 function fish_should_add_to_history
   string match --quiet -- 'warp_run_external_ctrl_r_widget *' $argv[1]; and return 1
-  functions -q warp_original_fish_should_add_to_history; and warp_original_fish_should_add_to_history $argv
+  warp_original_fish_should_add_to_history $argv
 end
 
 function warp_bootstrapped

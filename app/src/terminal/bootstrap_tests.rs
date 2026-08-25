@@ -62,3 +62,82 @@ fn test_trims_powershell_specifics() {
 fn decode_script(bytes: &[u8]) -> &str {
     std::str::from_utf8(bytes).expect("should not fail to decode")
 }
+
+fn fish_history_wrapper_installer() -> &'static str {
+    const FISH_SH: &str = include_str!("../../assets/bundled/bootstrap/fish.sh");
+    let start_marker = "if not functions -q warp_original_fish_should_add_to_history";
+    let end_marker = "  warp_original_fish_should_add_to_history $argv\nend";
+    let start = FISH_SH
+        .find(start_marker)
+        .expect("fish history wrapper installer start should exist");
+    let end = FISH_SH[start..]
+        .find(end_marker)
+        .expect("fish history wrapper installer end should exist");
+    &FISH_SH[start..start + end + end_marker.len()]
+}
+
+fn run_fish(script: &str) -> Option<String> {
+    let output = match std::process::Command::new("fish")
+        .args(["--no-config", "-c", script])
+        .output()
+    {
+        Ok(output) => output,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return None,
+        Err(error) => panic!("failed to run fish: {error}"),
+    };
+    assert!(
+        output.status.success(),
+        "fish exited with {:?}\nstdout:\n{}\nstderr:\n{}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    Some(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+#[test]
+fn test_fish_history_wrapper_accepts_normal_commands_across_resourcing() {
+    let installer = fish_history_wrapper_installer();
+    let script = format!(
+        r#"
+{installer}
+{installer}
+fish_should_add_to_history "echo normal"
+echo "normal:$status"
+fish_should_add_to_history "warp_run_external_ctrl_r_widget token"
+echo "helper:$status"
+"#
+    );
+    let Some(stdout) = run_fish(&script) else {
+        return;
+    };
+    assert!(stdout.contains("normal:0"), "{stdout}");
+    assert!(stdout.contains("helper:1"), "{stdout}");
+}
+
+#[test]
+fn test_fish_history_wrapper_preserves_user_hook_across_resourcing() {
+    let installer = fish_history_wrapper_installer();
+    let script = format!(
+        r#"
+function fish_should_add_to_history
+  string match --quiet -- "user_excluded*" $argv[1]; and return 1
+  return 0
+end
+{installer}
+{installer}
+fish_should_add_to_history "echo normal"
+echo "normal:$status"
+fish_should_add_to_history "warp_run_external_ctrl_r_widget token"
+echo "helper:$status"
+fish_should_add_to_history "user_excluded"
+echo "user:$status"
+"#
+    );
+    let Some(stdout) = run_fish(&script) else {
+        return;
+    };
+    assert!(stdout.contains("normal:0"), "{stdout}");
+    assert!(stdout.contains("helper:1"), "{stdout}");
+    assert!(stdout.contains("user:1"), "{stdout}");
+}
