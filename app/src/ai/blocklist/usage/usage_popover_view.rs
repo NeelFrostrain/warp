@@ -137,8 +137,20 @@ impl UsagePopoverView {
     /// exactly matching what [`Self::new`] would produce. Called by the
     /// footer each time the popover is opened, so reopening always starts
     /// from a clean slate without allocating a new view.
-    pub fn reset_for_conversation(&mut self, conversation_id: AIConversationId) {
+    ///
+    /// Notifies the view context so the popover is actually re-rendered:
+    /// `ViewContext::update` does not implicitly mark a view dirty, so
+    /// without this the popover kept painting its stale initial render
+    /// (constructed with a placeholder conversation id that never matches,
+    /// so it rendered empty) even after being pointed at a real
+    /// conversation.
+    pub fn reset_for_conversation(
+        &mut self,
+        conversation_id: AIConversationId,
+        ctx: &mut ViewContext<Self>,
+    ) {
         *self = Self::new(conversation_id);
+        ctx.notify();
     }
 
     fn render_header(&self, appearance: &Appearance) -> Box<dyn Element> {

@@ -2804,8 +2804,8 @@ impl TypedActionView for AgentInputFooter {
                         .map(|conversation| conversation.id());
                     match conversation_id {
                         Some(conversation_id) => {
-                            self.usage_popover.update(ctx, |popover, _ctx| {
-                                popover.reset_for_conversation(conversation_id);
+                            self.usage_popover.update(ctx, |popover, ctx| {
+                                popover.reset_for_conversation(conversation_id, ctx);
                             });
                         }
                         None => self.usage_popover_open = false,
