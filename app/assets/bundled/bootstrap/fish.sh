@@ -508,8 +508,9 @@ end
 # history search. Returns non-zero when `^R` is still on a fish default.
 #
 # `bind` lists fish's own defaults with a `--preset` flag, so any binding without it is one
-# the user (or a plugin like fzf or atuin) installed. Detection is deliberately generic: we
-# report the widget name and let Warp decide what it knows how to do with it.
+# the user (or a plugin like fzf or atuin) installed. The caller matches the reported name
+# against an exact allowlist of the widget names it knows how to invoke -- see
+# warp_run_external_ctrl_r_widget's comment.
 function warp_external_ctrl_r_widget
   # fish >= 4.0 renamed key specifications, so `bind` echoes back `ctrl-r` where earlier
   # versions echo `\cr`. Both spellings are accepted as input by every supported version,
@@ -537,11 +538,17 @@ end
 # We re-run each tool's own underlying picker rather than invoking its bound fish function: those
 # functions write the selection into fish's line buffer with `commandline`, which would leave the
 # text queued for execution in the shell rather than handing it to Warp's editor.
+#
+# $_WARP_EXTERNAL_CTRL_R_WIDGET is set during bootstrap (see warp_bootstrapped) to an exact
+# allowlist of each integration's canonical widget name -- not merely a name containing "fzf" or
+# "atuin" -- since an RC can legitimately bind ctrl-r to an unrelated fzf- or atuin-flavored
+# widget that isn't the history search below knows how to invoke. Adding another tool means
+# adding its widget name to both that allowlist and the case below.
 function warp_run_external_ctrl_r_widget
   set -l warp_ctrl_r_token "$argv[1]"
   set -l result ""
   switch "$_WARP_EXTERNAL_CTRL_R_WIDGET"
-    case '*fzf*'
+    case 'fzf-history-widget'
       # fzf's fish integration reads history through the shell rather than a history file, so
       # this mirrors the pipeline fzf-history-widget builds, minus its `commandline` calls.
       set -lx FZF_DEFAULT_OPTS (__fzf_defaults '' \
@@ -565,7 +572,7 @@ function warp_run_external_ctrl_r_widget
       if set selected (eval $FZF_DEFAULT_COMMAND \| (__fzfcmd) | string split0)
         set result (string replace -a -- \n\t \n $selected[1])
       end
-    case '*atuin*'
+    case '_atuin_search'
       # atuin writes its TUI to stdout and the selection to fd 3, so the two are swapped here to
       # leave the UI on the terminal and capture only the selection.
       set -l output (ATUIN_SHELL_FISH=t ATUIN_LOG=error atuin search -i 3>&1 1>&2 2>&3 | string collect)
@@ -576,6 +583,24 @@ function warp_run_external_ctrl_r_widget
   set -l warp_escaped_selection (warp_escape_json "$result")
   set -l warp_escaped_token (warp_escape_json "$warp_ctrl_r_token")
   warp_send_json_message "{ \"hook\": \"ExternalCtrlRSelection\", \"value\": { \"buffer\": \"$warp_escaped_selection\", \"token\": \"$warp_escaped_token\", \"session_id\": $WARP_SESSION_ID } }"
+end
+
+# Exclude the ctrl-r external history handoff helper (see warp_run_external_ctrl_r_widget
+# above) from the user's history: it's a Warp-internal invocation, not a command the user meant
+# to run again later, and leaving it in history would otherwise pollute the very history list
+# this feature searches on the next ctrl-r.
+#
+# fish only supports a single fish_should_add_to_history function (unlike zsh's array of
+# zshaddhistory hooks or bash's PROMPT_COMMAND-style stacking), so compose with any
+# user-defined one -- e.g. from a plugin sourced in config.fish before this bootstrap script
+# runs -- rather than clobbering it, following the same backup pattern warp_update_prompt_vars
+# uses for fish_prompt.
+if functions -q fish_should_add_to_history; and not functions -q warp_original_fish_should_add_to_history
+  functions -c fish_should_add_to_history warp_original_fish_should_add_to_history
+end
+function fish_should_add_to_history
+  string match --quiet -- 'warp_run_external_ctrl_r_widget *' $argv[1]; and return 1
+  functions -q warp_original_fish_should_add_to_history; and warp_original_fish_should_add_to_history $argv
 end
 
 function warp_bootstrapped
@@ -594,9 +619,12 @@ function warp_bootstrapped
   # Tags for shell configurations Warp needs to know about, matching the `shell_plugins`
   # list bash and zsh already report. Newline-separated, one tag per line.
   set -l shell_plugins
-  set -g _WARP_EXTERNAL_CTRL_R_WIDGET (warp_external_ctrl_r_widget)
-  if test -n "$_WARP_EXTERNAL_CTRL_R_WIDGET"
-    set -a shell_plugins external_ctrl_r_history
+  set -g _WARP_EXTERNAL_CTRL_R_WIDGET ""
+  set -l warp_ctrl_r_widget (warp_external_ctrl_r_widget)
+  switch "$warp_ctrl_r_widget"
+    case 'fzf-history-widget' '_atuin_search'
+      set -g _WARP_EXTERNAL_CTRL_R_WIDGET "$warp_ctrl_r_widget"
+      set -a shell_plugins external_ctrl_r_history
   end
   set -l escaped_shell_plugins (warp_escape_json $shell_plugins)
 

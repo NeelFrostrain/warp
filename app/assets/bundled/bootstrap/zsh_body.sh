@@ -689,12 +689,12 @@ if [[ -z $WARP_BOOTSTRAPPED ]]; then
     local warp_ctrl_r_token="$1"
     local result=""
     case "$_WARP_EXTERNAL_CTRL_R_WIDGET" in
-      *fzf*)
+      fzf-history-widget)
         result="$(fc -rl 1 \
           | command -p awk '{ cmd=$0; sub(/^[ \t]*[0-9]+\**[ \t]+/, "", cmd); if (!seen[cmd]++) print cmd }' \
           | fzf --scheme=history --tiebreak=index +m)"
         ;;
-      *atuin*)
+      atuin-search|atuin-search-viins|atuin-search-vicmd|_atuin_search_widget)
         # atuin writes its TUI to stdout; under plain command substitution that's a pipe, and
         # its cursor-position query (\x1b[6n) has nothing to answer it, so it bails during
         # startup. Swap stdout/stderr through fd 3, matching atuin's own zsh integration
@@ -1360,17 +1360,18 @@ esac
 
   # Detect whether ctrl-r has been rebound to fzf's or atuin's history widget, so Warp can
   # hand ctrl-r off to it at an idle prompt instead of opening Warp's own command search.
-  # Detection is scoped to exactly the tools warp_run_external_ctrl_r_widget below knows how
-  # to invoke: invoking an arbitrary rebound widget outside of an active zle context isn't
-  # possible in general (see that function's comment), so tagging a tool we can't invoke would
-  # cost the user both Warp's command search and their own binding on every ctrl-r press.
-  # Adding another tool means adding it to both this pattern and the case below.
+  # Matched against an exact allowlist of each integration's canonical widget names -- not
+  # merely a name containing "fzf" or "atuin" -- since an RC can legitimately bind ctrl-r to an
+  # unrelated fzf- or atuin-flavored widget that isn't the history search we know how to invoke;
+  # rerouting those to the hard-coded history picker would cost the user both their own binding
+  # and Warp's command search on every ctrl-r press. Adding another tool means adding its widget
+  # name to both this list and the case below.
   _WARP_EXTERNAL_CTRL_R_WIDGET=""
   warp_ctrl_r_binding="$(bindkey -M main '^R' 2>/dev/null)"
   if [[ "$warp_ctrl_r_binding" == '"^R" '* ]]; then
     warp_ctrl_r_widget="${warp_ctrl_r_binding#\"^R\" }"
     case "$warp_ctrl_r_widget" in
-      *fzf*|*atuin*)
+      fzf-history-widget|atuin-search|atuin-search-viins|atuin-search-vicmd|_atuin_search_widget)
         _WARP_EXTERNAL_CTRL_R_WIDGET="$warp_ctrl_r_widget"
         shell_plugins+=(external_ctrl_r_history)
         ;;
