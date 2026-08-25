@@ -579,6 +579,12 @@ function warp_run_external_ctrl_r_widget
       # atuin prefixes the selection with __atuin_accept__: when `enter_accept` is on and the
       # user pressed enter. Warp always inserts without executing, so the prefix is dropped.
       set result (string replace "__atuin_accept__:" "" -- "$output" | string collect)
+      # atuin's own preexec/precmd hooks already recorded this invocation into its separate
+      # history database the moment it started -- independent of the fish_should_add_to_history
+      # exclusion above, which only keeps it out of fish's own history. Delete that entry now
+      # so it doesn't show up the next time the user searches with ctrl-r; the handoff token
+      # makes the match exact.
+      atuin search --delete -- "warp_run_external_ctrl_r_widget $warp_ctrl_r_token" >/dev/null 2>&1
   end
   set -l warp_escaped_selection (warp_escape_json "$result")
   set -l warp_escaped_token (warp_escape_json "$warp_ctrl_r_token")
@@ -643,9 +649,19 @@ function warp_bootstrapped
   set -g _WARP_EXTERNAL_CTRL_R_WIDGET ""
   set -l warp_ctrl_r_widget (warp_external_ctrl_r_widget)
   switch "$warp_ctrl_r_widget"
-    case 'fzf-history-widget' '_atuin_search'
+    case 'fzf-history-widget'
       set -g _WARP_EXTERNAL_CTRL_R_WIDGET "$warp_ctrl_r_widget"
       set -a shell_plugins external_ctrl_r_history
+    case '_atuin_search'
+      set -g _WARP_EXTERNAL_CTRL_R_WIDGET "$warp_ctrl_r_widget"
+      set -a shell_plugins external_ctrl_r_history
+      # atuin records every command into its own history database via its own preexec/precmd
+      # hooks, independent of the fish_should_add_to_history exclusion above, so past handoff
+      # invocations (e.g. from before this cleanup existed, or a session that exited before
+      # warp_run_external_ctrl_r_widget's own cleanup ran) can still be sitting in it. Sweep
+      # those up once per bootstrap; backgrounded since it's pure hygiene and not needed for
+      # the handoff itself to work.
+      atuin search --delete -- "warp_run_external_ctrl_r_widget" >/dev/null 2>&1 &
   end
   set -l escaped_shell_plugins (warp_escape_json $shell_plugins)
 

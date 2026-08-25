@@ -705,6 +705,12 @@ if [[ -z $WARP_BOOTSTRAPPED ]]; then
         # command, signaled by this prefix; we only ever want the selection, never to run it,
         # so strip the prefix in both cases (see atuin's _atuin_search for the same check).
         result="${result#__atuin_accept__:}"
+        # atuin's own preexec/precmd hooks already recorded this invocation into its separate
+        # history database the moment it started -- independent of the zshaddhistory exclusion
+        # above, which only keeps it out of zsh's own history. Delete that entry now so it
+        # doesn't show up the next time the user searches with ctrl-r; the handoff token makes
+        # the match exact.
+        atuin search --delete -- "warp_run_external_ctrl_r_widget $warp_ctrl_r_token" >/dev/null 2>&1
         ;;
     esac
     local warp_escaped_selection="$(warp_escape_json "$result")"
@@ -1371,9 +1377,20 @@ esac
   if [[ "$warp_ctrl_r_binding" == '"^R" '* ]]; then
     warp_ctrl_r_widget="${warp_ctrl_r_binding#\"^R\" }"
     case "$warp_ctrl_r_widget" in
-      fzf-history-widget|atuin-search|atuin-search-viins|atuin-search-vicmd|_atuin_search_widget)
+      fzf-history-widget)
         _WARP_EXTERNAL_CTRL_R_WIDGET="$warp_ctrl_r_widget"
         shell_plugins+=(external_ctrl_r_history)
+        ;;
+      atuin-search|atuin-search-viins|atuin-search-vicmd|_atuin_search_widget)
+        _WARP_EXTERNAL_CTRL_R_WIDGET="$warp_ctrl_r_widget"
+        shell_plugins+=(external_ctrl_r_history)
+        # atuin records every command into its own history database via its own preexec/precmd
+        # hooks, independent of the zshaddhistory exclusion above, so past handoff invocations
+        # (e.g. from before this cleanup existed, or a session that exited before
+        # warp_run_external_ctrl_r_widget's own cleanup ran) can still be sitting in it. Sweep
+        # those up once per bootstrap; backgrounded since it's pure hygiene and not needed for
+        # the handoff itself to work.
+        (atuin search --delete -- "warp_run_external_ctrl_r_widget" >/dev/null 2>&1 &)
         ;;
     esac
   fi
