@@ -2180,6 +2180,13 @@ pub fn init(app: &mut AppContext) {
         )
         .with_context_predicate(id!("Input"))
         .with_key_binding("tab"),
+        EditableBinding::new(
+            "workspace:trigger_external_ctrl_t_file_search",
+            "External File Search",
+            WorkspaceAction::TriggerExternalCtrlTFileSearch,
+        )
+        .with_context_predicate(id!("Input") & !id!("VoltronActive"))
+        .with_key_binding("ctrl-t"),
     ]);
 
     if let Some(custom_action) = workflows::CategoriesView::custom_action() {

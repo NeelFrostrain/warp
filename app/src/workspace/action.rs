@@ -355,6 +355,10 @@ pub enum WorkspaceAction {
     ClickedAIAssistantIcon,
     ToggleKeybindingsPage,
     ShowCommandSearch(CommandSearchOptions),
+    /// If the active session's shell has rebound ctrl-t to an external file-search widget
+    /// (e.g. fzf), hands the keypress off to it. A no-op otherwise -- unlike `ShowCommandSearch`,
+    /// there's no Warp-native ctrl-t UI to fall back to.
+    TriggerExternalCtrlTFileSearch,
     CreatePersonalNotebook,
     ImportToPersonalDrive,
     ImportToTeamDrive,
@@ -1072,6 +1076,7 @@ impl WorkspaceAction {
             | OpenPromptSuggestionsUnavailableModal
             | ToggleKeybindingsPage
             | ShowCommandSearch(_)
+            | TriggerExternalCtrlTFileSearch
             | ToggleMouseReporting
             | ToggleScrollReporting
             | ToggleFocusReporting

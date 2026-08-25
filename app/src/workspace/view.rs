@@ -17366,6 +17366,20 @@ impl Workspace {
         }
     }
 
+    /// If the active session's shell has rebound ctrl-t to an external file-search widget
+    /// (e.g. fzf), hands the keypress off to it. A no-op otherwise -- unlike
+    /// [`Self::show_command_search`], ctrl-t has no Warp-native UI to fall back to.
+    fn trigger_external_ctrl_t_file_search(&mut self, ctx: &mut ViewContext<Self>) {
+        if self.is_readonly_shared_session_active(ctx) {
+            return;
+        }
+        if let Some(terminal_view_handle) = self.active_session_view(ctx) {
+            terminal_view_handle.update(ctx, |terminal_view, ctx| {
+                terminal_view.maybe_trigger_external_ctrl_t_file_search(ctx);
+            });
+        }
+    }
+
     fn get_active_input_view_handle(&self, app: &AppContext) -> Option<ViewHandle<Input>> {
         app.view(self.active_tab_pane_group())
             .active_session_view(app)
@@ -24496,6 +24510,7 @@ impl TypedActionView for Workspace {
                 filter,
                 init_content,
             }) => self.show_command_search(*filter, init_content, ctx),
+            TriggerExternalCtrlTFileSearch => self.trigger_external_ctrl_t_file_search(ctx),
             ImportToPersonalDrive => {
                 if let Some(personal_drive) = UserWorkspaces::as_ref(ctx).personal_drive(ctx) {
                     self.open_import_modal(personal_drive, &None, ctx);
