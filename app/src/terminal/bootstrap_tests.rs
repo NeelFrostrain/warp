@@ -77,7 +77,7 @@ fn fish_history_wrapper_installer() -> &'static str {
 }
 
 fn run_fish(script: &str) -> Option<String> {
-    let output = match std::process::Command::new("fish")
+    let output = match command::blocking::Command::new("fish")
         .args(["--no-config", "-c", script])
         .output()
     {
