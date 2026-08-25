@@ -724,6 +724,18 @@ const EXTERNAL_CTRL_R_HISTORY_PLUGIN_TAG: &str = "external_ctrl_r_history";
 /// `app/assets/bundled/bootstrap/zsh_body.sh`.
 const EXTERNAL_CTRL_R_HELPER_COMMAND: &str = "warp_run_external_ctrl_r_widget";
 
+/// `shell_plugins` tag reported by bootstrap when the shell's `^T` binding has been rebound away
+/// from its default line-editor binding to an external file-search widget (e.g. fzf). Independent
+/// of [`EXTERNAL_CTRL_R_HISTORY_PLUGIN_TAG`] -- a shell can have either, both, or neither, since
+/// each binding is detected and reported on its own. Must match the tag name used in
+/// `app/assets/bundled/bootstrap/zsh_body.sh`.
+const EXTERNAL_CTRL_T_FILE_PLUGIN_TAG: &str = "external_ctrl_t_file";
+
+/// Name of the bootstrap-installed shell function invoked to hand ctrl-t off to the shell's own
+/// external file-search widget. Must match the function name defined in
+/// `app/assets/bundled/bootstrap/zsh_body.sh`.
+const EXTERNAL_CTRL_T_HELPER_COMMAND: &str = "warp_run_external_ctrl_t_widget";
+
 pub const LONG_RUNNING_AGENT_REQUESTED_COMMAND_CONTEXT_KEY: &str = "LongRunningRequestedCommand";
 pub const LONG_RUNNING_AGENT_REQUESTED_COMMAND_USER_TOOK_OVER_CONTEXT_KEY: &str =
     "LongRunningRequestedUserTookOverCommand";
@@ -9240,6 +9252,44 @@ impl TerminalView {
         })
     }
 
+    /// If ctrl-t was pressed at an idle prompt on a session whose shell has rebound `^T` to an
+    /// external file-search widget (reported via the [`EXTERNAL_CTRL_T_FILE_PLUGIN_TAG`] shell
+    /// plugin tag, e.g. by fzf), hands the keypress off to that widget. Mirrors
+    /// [`Self::maybe_trigger_external_ctrl_r_history_search`], but lands the selection by
+    /// inserting it into the input editor at the cursor position rather than replacing the
+    /// whole buffer; see [`Input::trigger_external_ctrl_t_file_search`].
+    ///
+    /// Returns `true` if the handoff was triggered, in which case the caller should not pass
+    /// ctrl-t through to the pty or handle it any other way.
+    pub fn maybe_trigger_external_ctrl_t_file_search(
+        &mut self,
+        ctx: &mut ViewContext<Self>,
+    ) -> bool {
+        if !FeatureFlag::ShellWidgetHandoff.is_enabled() || self.is_long_running() {
+            return false;
+        }
+        let Some(session_id) = self.active_block_session_id() else {
+            return false;
+        };
+        let has_external_ctrl_t_widget =
+            self.sessions
+                .as_ref(ctx)
+                .get(session_id)
+                .is_some_and(|session| {
+                    session
+                        .shell()
+                        .plugins()
+                        .contains(EXTERNAL_CTRL_T_FILE_PLUGIN_TAG)
+                });
+        if !has_external_ctrl_t_widget || self.model.lock().is_alt_screen_active() {
+            return false;
+        }
+
+        self.input.update(ctx, |input, ctx| {
+            input.trigger_external_ctrl_t_file_search(EXTERNAL_CTRL_T_HELPER_COMMAND, ctx)
+        })
+    }
+
     /// Returns `true` when an interactive SSH command has been detected at
     /// preexec and the SSH block is still running (long-running). Used by
     /// the workspace to derive `PendingRemoteSession` without storing
@@ -12979,6 +13029,15 @@ impl TerminalView {
                 {
                     self.input.update(ctx, |input, _ctx| {
                         input.set_external_ctrl_r_selection(session_id, &data.token, &data.buffer);
+                    });
+                }
+            }
+            ModelEvent::ExternalCtrlTSelection(data) => {
+                if FeatureFlag::ShellWidgetHandoff.is_enabled()
+                    && let Some(session_id) = data.session_id.map(SessionId::from)
+                {
+                    self.input.update(ctx, |input, _ctx| {
+                        input.set_external_ctrl_t_selection(session_id, &data.token, &data.buffer);
                     });
                 }
             }

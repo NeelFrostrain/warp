@@ -10,7 +10,9 @@ pub use remote_server::setup::RemoteServerSetupState;
 use warp_util::lazy::Lazy;
 
 use super::history::HistoryEntry;
-use super::model::ansi::{ExternalCtrlRSelectionValue, FinishUpdateValue};
+use super::model::ansi::{
+    ExternalCtrlRSelectionValue, ExternalCtrlTSelectionValue, FinishUpdateValue,
+};
 use super::model::block::BlockId;
 use super::model::lifecycle::LifecycleRecoveryRecord;
 use super::model::session::{SessionId, SessionInfo};
@@ -133,6 +135,9 @@ pub enum Event {
     /// Emitted when the shell reports the command selected in its external ctrl-r history
     /// widget (e.g. fzf or atuin).
     ExternalCtrlRSelection(ExternalCtrlRSelectionValue),
+    /// Emitted when the shell reports the path(s) selected in its external ctrl-t file-search
+    /// widget (e.g. fzf).
+    ExternalCtrlTSelection(ExternalCtrlTSelectionValue),
     TextSelectionChanged,
     ShellSpawned(ShellType),
     SendCompletionsPrompt,
@@ -541,6 +546,15 @@ impl Debug for Event {
                 write!(
                     f,
                     "ExternalCtrlRSelection(buffer_len: {})",
+                    data.buffer.len()
+                )
+            }
+            Event::ExternalCtrlTSelection(data) => {
+                // The buffer is a selected file path, which may reveal filesystem structure;
+                // log only its length rather than its contents.
+                write!(
+                    f,
+                    "ExternalCtrlTSelection(buffer_len: {})",
                     data.buffer.len()
                 )
             }

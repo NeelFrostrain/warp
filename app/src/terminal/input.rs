@@ -1783,6 +1783,11 @@ pub struct Input {
     /// [`Self::trigger_external_ctrl_r_history_search`], if any. `None` once the handoff's block
     /// has completed (see [`Self::handle_block_completed_event`]) or no handoff is in flight.
     pending_ctrl_r_handoff: Option<PendingCtrlRHandoff>,
+
+    /// State for an in-flight external ctrl-t handoff started by
+    /// [`Self::trigger_external_ctrl_t_file_search`], if any. `None` once the handoff's block
+    /// has completed (see [`Self::handle_block_completed_event`]) or no handoff is in flight.
+    pending_ctrl_t_handoff: Option<PendingCtrlTHandoff>,
 }
 
 /// State for an in-flight external ctrl-r handoff (see
@@ -1820,6 +1825,50 @@ impl PendingCtrlRHandoff {
         }
         if !selection.is_empty() {
             handoff.restore_text = selection.to_string();
+        }
+    }
+}
+
+/// State for an in-flight external ctrl-t handoff (see
+/// [`Input::trigger_external_ctrl_t_file_search`]). Unlike ctrl-r, which replaces the entire
+/// buffer with the selection, ctrl-t inserts the selection into the buffer the user had before
+/// the handoff, at the cursor position ctrl-t was pressed at -- so this snapshots the original
+/// buffer and cursor offset separately from the (initially absent) selection.
+struct PendingCtrlTHandoff {
+    session_id: SessionId,
+    token: String,
+    /// The buffer the user had before ctrl-t was pressed, restored verbatim on cancel (or as the
+    /// base the selection is inserted into, on a completed selection).
+    original_buffer: String,
+    /// The byte offset within `original_buffer` that the selection is inserted at.
+    cursor_offset: ByteOffset,
+    /// The selected path(s), once a matching `ExternalCtrlTSelection` hook supplies one. `None`
+    /// while no selection has arrived yet, or the user cancelled without selecting anything.
+    insertion: Option<String>,
+    /// The block running the synthetic helper command. Hidden once it completes (see
+    /// [`Input::handle_block_completed_event`]) so it doesn't clutter scrollback.
+    block_id: BlockId,
+}
+
+impl PendingCtrlTHandoff {
+    /// Applies `selection` to `pending` if it matches an in-flight handoff for `session_id` and
+    /// `token`; otherwise leaves `pending` untouched. Mirrors
+    /// [`PendingCtrlRHandoff::maybe_apply_selection`] -- see its comment for why this guards
+    /// against unsolicited and stale selections.
+    fn maybe_apply_selection(
+        pending: &mut Option<Self>,
+        session_id: SessionId,
+        token: &str,
+        selection: &str,
+    ) {
+        let Some(handoff) = pending else {
+            return;
+        };
+        if handoff.session_id != session_id || handoff.token != token {
+            return;
+        }
+        if !selection.is_empty() {
+            handoff.insertion = Some(selection.to_string());
         }
     }
 }
@@ -4068,6 +4117,7 @@ impl Input {
             ephemeral_message_model,
             input_contents_before_prompt_chip_command: None,
             pending_ctrl_r_handoff: None,
+            pending_ctrl_t_handoff: None,
         };
 
         #[cfg(feature = "local_fs")]
@@ -7598,6 +7648,64 @@ impl Input {
     ) {
         PendingCtrlRHandoff::maybe_apply_selection(
             &mut self.pending_ctrl_r_handoff,
+            session_id,
+            token,
+            selection,
+        );
+    }
+
+    /// Runs `helper_command` (a bootstrap-installed shell function) as if the user had typed and
+    /// submitted it, mirroring [`Self::trigger_external_ctrl_r_history_search`]. Unlike ctrl-r,
+    /// which replaces the whole buffer with the selection, ctrl-t inserts the selection into the
+    /// buffer at the cursor position ctrl-t was pressed at -- so this snapshots the current
+    /// buffer text and cursor byte offset separately, rather than a single restorable string.
+    /// Returns `true` if the command was started.
+    ///
+    /// See [`Self::trigger_external_ctrl_r_history_search`] for why the command is prefixed with
+    /// a leading space.
+    pub fn trigger_external_ctrl_t_file_search(
+        &mut self,
+        helper_command: &str,
+        ctx: &mut ViewContext<Self>,
+    ) -> bool {
+        let Some(session_id) = self.active_block_session_id() else {
+            return false;
+        };
+        let original_buffer = self.buffer_text(ctx);
+        let cursor_offset = self
+            .editor
+            .as_ref(ctx)
+            .end_byte_index_of_last_selection(ctx);
+        let block_id = self.model.lock().block_list().active_block_id().clone();
+        let token = Uuid::new_v4().to_string();
+        let command = format!(" {helper_command} {token}");
+        let started =
+            self.try_execute_command_from_source(&command, CommandExecutionSource::User, ctx);
+        if started {
+            self.pending_ctrl_t_handoff = Some(PendingCtrlTHandoff {
+                session_id,
+                token,
+                original_buffer,
+                cursor_offset,
+                insertion: None,
+                block_id,
+            });
+        }
+        started
+    }
+
+    /// Called when the shell reports the path(s) selected in the external ctrl-t file search
+    /// (fzf). Applies the selection only if `session_id` and `token` match an in-flight handoff
+    /// this session started (see [`PendingCtrlTHandoff`]); otherwise ignores it, mirroring
+    /// [`Self::set_external_ctrl_r_selection`].
+    pub fn set_external_ctrl_t_selection(
+        &mut self,
+        session_id: SessionId,
+        token: &str,
+        selection: &str,
+    ) {
+        PendingCtrlTHandoff::maybe_apply_selection(
+            &mut self.pending_ctrl_t_handoff,
             session_id,
             token,
             selection,
@@ -15340,11 +15448,11 @@ impl Input {
                 && !cloud_setup_pre_first_exchange
                 && !self.has_queued_command_in_flight(ctx);
             let latest_block_id = self.model.lock().block_list().active_block_id().clone();
-            // Prefer a prompt-chip restore (e.g. `cd`) over a ctrl-r handoff restore; the two
+            // Prefer a prompt-chip restore (e.g. `cd`) over a ctrl-r/ctrl-t handoff restore; these
             // cannot both be pending for the same block in practice. Taking
-            // `pending_ctrl_r_handoff` here also ends that handoff: any `ExternalCtrlRSelection`
-            // hook that arrives after this point is treated as stale and ignored (see
-            // `PendingCtrlRHandoff`).
+            // `pending_ctrl_r_handoff`/`pending_ctrl_t_handoff` here also ends that handoff: any
+            // `ExternalCtrlRSelection`/`ExternalCtrlTSelection` hook that arrives after this point
+            // is treated as stale and ignored (see `PendingCtrlRHandoff`/`PendingCtrlTHandoff`).
             let completed_ctrl_r_handoff = self
                 .pending_ctrl_r_handoff
                 .take_if(|handoff| handoff.block_id == block_completed_event.block_id);
@@ -15354,10 +15462,24 @@ impl Input {
                     .block_list_mut()
                     .hide_block(&handoff.block_id);
             }
+            let completed_ctrl_t_handoff = self
+                .pending_ctrl_t_handoff
+                .take_if(|handoff| handoff.block_id == block_completed_event.block_id);
+            if let Some(handoff) = &completed_ctrl_t_handoff {
+                self.model
+                    .lock()
+                    .block_list_mut()
+                    .hide_block(&handoff.block_id);
+            }
             let pending_input_restore = self
                 .input_contents_before_prompt_chip_command
                 .take()
-                .or_else(|| completed_ctrl_r_handoff.map(|handoff| handoff.restore_text));
+                .or_else(|| completed_ctrl_r_handoff.map(|handoff| handoff.restore_text))
+                .or_else(|| {
+                    completed_ctrl_t_handoff
+                        .as_ref()
+                        .map(|handoff| handoff.original_buffer.clone())
+                });
 
             if should_clear_buffer {
                 // We want to reinitialize the buffer whenever a command is completed so that
@@ -15369,11 +15491,29 @@ impl Input {
                     self.latest_buffer_operations = Vec::new();
 
                     // If we have a pending input restore (from a prompt chip command like cd, or
-                    // a ctrl-r external history handoff), restore the input contents instead of
+                    // a ctrl-r/ctrl-t external handoff), restore the input contents instead of
                     // leaving the buffer empty.
                     if let Some(restore_text) = pending_input_restore {
                         self.editor.update(ctx, |editor, ctx| {
                             editor.set_buffer_text(&restore_text, ctx);
+                            // A ctrl-t handoff restores the pre-handoff buffer above, then (unlike
+                            // ctrl-r) splices its selection in at the captured cursor offset
+                            // instead of replacing the whole buffer, or just moves the cursor back
+                            // to that offset if the user cancelled without selecting anything.
+                            if let Some(handoff) = &completed_ctrl_t_handoff {
+                                match &handoff.insertion {
+                                    Some(insertion) => editor.select_and_replace(
+                                        insertion,
+                                        [handoff.cursor_offset..handoff.cursor_offset],
+                                        PlainTextEditorViewAction::InsertSelectedText,
+                                        ctx,
+                                    ),
+                                    None => editor.select_ranges_by_byte_offset(
+                                        [handoff.cursor_offset..handoff.cursor_offset],
+                                        ctx,
+                                    ),
+                                }
+                            }
                         });
                         self.is_editor_empty_on_last_edit = false;
                     } else {

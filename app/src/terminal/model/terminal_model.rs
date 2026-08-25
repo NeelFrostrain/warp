@@ -65,9 +65,9 @@ pub use crate::terminal::history::HistoryEntry;
 use crate::terminal::model::ansi;
 use crate::terminal::model::ansi::{
     ClearValue, CommandFinishedValue, CompletionMetadata, ExitShellValue,
-    ExternalCtrlRSelectionValue, Handler, InitShellValue, InitSubshellValue,
-    PreInteractiveSSHSessionValue, PrecmdValue, PreexecValue, PromptMetadata, SSHValue,
-    SourcedRcFileForWarpValue,
+    ExternalCtrlRSelectionValue, ExternalCtrlTSelectionValue, Handler, InitShellValue,
+    InitSubshellValue, PreInteractiveSSHSessionValue, PrecmdValue, PreexecValue, PromptMetadata,
+    SSHValue, SourcedRcFileForWarpValue,
 };
 use crate::terminal::model::bootstrap::BootstrapStage;
 use crate::terminal::model::completions::{
@@ -3180,6 +3180,11 @@ impl ansi::Handler for TerminalModel {
     fn external_ctrl_r_selection(&mut self, data: ExternalCtrlRSelectionValue) {
         self.event_proxy
             .send_terminal_event(Event::ExternalCtrlRSelection(data));
+    }
+
+    fn external_ctrl_t_selection(&mut self, data: ExternalCtrlTSelectionValue) {
+        self.event_proxy
+            .send_terminal_event(Event::ExternalCtrlTSelection(data));
     }
 
     fn init_subshell(&mut self, data: InitSubshellValue) {

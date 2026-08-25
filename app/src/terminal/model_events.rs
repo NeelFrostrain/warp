@@ -5,7 +5,9 @@ use warpui::{Entity, ModelContext, ModelHandle, SingletonEntity};
 
 use super::event::{BootstrappedEvent, SshLoginStatus};
 use super::model::ansi;
-use super::model::ansi::{ExternalCtrlRSelectionValue, FinishUpdateValue};
+use super::model::ansi::{
+    ExternalCtrlRSelectionValue, ExternalCtrlTSelectionValue, FinishUpdateValue,
+};
 use super::model::block::BlockId;
 use super::model::completions::ShellCompletion;
 use super::model::lifecycle::LifecycleTelemetryEvent;
@@ -262,6 +264,7 @@ impl ModelEventDispatcher {
             Event::Typeahead => ModelEvent::Typeahead,
             Event::FinishUpdate(data) => ModelEvent::FinishUpdate(data),
             Event::ExternalCtrlRSelection(data) => ModelEvent::ExternalCtrlRSelection(data),
+            Event::ExternalCtrlTSelection(data) => ModelEvent::ExternalCtrlTSelection(data),
             Event::TextSelectionChanged => ModelEvent::SelectedTextChanged,
             Event::ShellSpawned(shell_type) => ModelEvent::ShellSpawned(shell_type),
             Event::SendCompletionsPrompt => ModelEvent::SendCompletionsPrompt,
@@ -450,6 +453,9 @@ pub enum ModelEvent {
     /// Emitted when the shell reports the command selected in its external ctrl-r history
     /// widget (e.g. fzf or atuin).
     ExternalCtrlRSelection(ExternalCtrlRSelectionValue),
+    /// Emitted when the shell reports the path(s) selected in its external ctrl-t file-search
+    /// widget (e.g. fzf).
+    ExternalCtrlTSelection(ExternalCtrlTSelectionValue),
     SelectedTextChanged,
     ShellSpawned(ShellType),
     CompletionsFinished(Vec<ShellCompletion>),

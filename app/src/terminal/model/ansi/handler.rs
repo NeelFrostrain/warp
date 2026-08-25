@@ -312,6 +312,10 @@ pub trait Handler {
     /// external ctrl-r history widget (e.g. fzf or atuin).
     fn external_ctrl_r_selection(&mut self, _data: ExternalCtrlRSelectionValue) {}
 
+    /// Callback for the terminal when the shell reports the path(s) selected in its
+    /// external ctrl-t file-search widget (e.g. fzf).
+    fn external_ctrl_t_selection(&mut self, _data: ExternalCtrlTSelectionValue) {}
+
     /// Callback emitted during the initialization process for subshells with where the shell type
     /// is initiall not known.
     fn init_subshell(&mut self, _data: InitSubshellValue) {}

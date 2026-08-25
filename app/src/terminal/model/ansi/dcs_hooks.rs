@@ -74,6 +74,12 @@ pub(super) enum DProtoHook {
     ExternalCtrlRSelection {
         value: ExternalCtrlRSelectionValue,
     },
+    /// Reports the path(s) selected in the shell's external ctrl-t file-search widget (e.g.
+    /// fzf), so they can be inserted into the input editor at the cursor position ctrl-t was
+    /// pressed at. See [`ExternalCtrlTSelectionValue`].
+    ExternalCtrlTSelection {
+        value: ExternalCtrlTSelectionValue,
+    },
     Clear {
         value: ClearValue,
     },
@@ -102,6 +108,7 @@ const DPROTO_HOOK_VARIANTS: &[&str] = &[
     "InitShell",
     "InputBuffer",
     "ExternalCtrlRSelection",
+    "ExternalCtrlTSelection",
     "Clear",
     "InitSubshell",
     "SourcedRcFileForWarp",
@@ -158,6 +165,9 @@ impl<'de> Deserialize<'de> for DProtoHook {
             "ExternalCtrlRSelection" => DProtoHook::ExternalCtrlRSelection {
                 value: parse_hook_value::<_, D::Error>(raw.value)?,
             },
+            "ExternalCtrlTSelection" => DProtoHook::ExternalCtrlTSelection {
+                value: parse_hook_value::<_, D::Error>(raw.value)?,
+            },
             "Clear" => DProtoHook::Clear {
                 value: parse_hook_value::<_, D::Error>(raw.value)?,
             },
@@ -195,6 +205,7 @@ impl DProtoHook {
             DProtoHook::InitShell { .. } => "InitShell",
             DProtoHook::InputBuffer { .. } => "InputBuffer",
             DProtoHook::ExternalCtrlRSelection { .. } => "ExternalCtrlRSelection",
+            DProtoHook::ExternalCtrlTSelection { .. } => "ExternalCtrlTSelection",
             DProtoHook::Clear { .. } => "Clear",
             DProtoHook::InitSubshell { .. } => "InitSubshell",
             DProtoHook::SourcedRcFileForWarp { .. } => "SourcedRcFileForWarp",
@@ -215,6 +226,7 @@ impl DProtoHook {
             DProtoHook::Bootstrapped { value } => value.session_id.map(SessionId::from),
             DProtoHook::InputBuffer { value } => value.session_id.map(SessionId::from),
             DProtoHook::ExternalCtrlRSelection { value } => value.session_id.map(SessionId::from),
+            DProtoHook::ExternalCtrlTSelection { value } => value.session_id.map(SessionId::from),
             DProtoHook::Clear { value } => value.session_id.map(SessionId::from),
             DProtoHook::FinishUpdate { value } => value.session_id.map(SessionId::from),
             DProtoHook::PreInteractiveSSHSession { value } => value.session_id.map(SessionId::from),
@@ -237,6 +249,7 @@ impl DProtoHook {
             | DProtoHook::InitShell { .. }
             | DProtoHook::InputBuffer { .. }
             | DProtoHook::ExternalCtrlRSelection { .. }
+            | DProtoHook::ExternalCtrlTSelection { .. }
             | DProtoHook::Clear { .. }
             | DProtoHook::InitSubshell { .. }
             | DProtoHook::FinishUpdate { .. }
@@ -1019,6 +1032,36 @@ impl std::fmt::Debug for ExternalCtrlRSelectionValue {
     /// sensitive data (e.g. a secret typed into an earlier command).
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ExternalCtrlRSelectionValue")
+            .field("buffer", &"<redacted>")
+            .field("token", &self.token)
+            .field("session_id", &self.session_id)
+            .finish()
+    }
+}
+
+/// Received from the pty after the shell's external ctrl-t file-search widget (e.g. fzf,
+/// detected via the `external_ctrl_t_file` [`BootstrappedValue::shell_plugins`] tag) finishes,
+/// reporting the path(s) the user selected. Empty when the user cancelled without selecting
+/// anything. Warp inserts the selection into the input editor, at the cursor position ctrl-t
+/// was pressed at, without executing it.
+///
+/// `token` echoes back the handoff token the client sent as an argument to the shell helper that
+/// emits this hook, so the client can verify this is the reply to a handoff it's actually
+/// waiting on rather than an unsolicited or stale write to the pty.
+#[derive(Default, Clone, PartialEq, Eq, Deserialize, Serialize)]
+pub struct ExternalCtrlTSelectionValue {
+    pub buffer: String,
+    #[serde(default)]
+    pub token: String,
+    #[serde(default)]
+    pub session_id: HookSessionId,
+}
+
+impl std::fmt::Debug for ExternalCtrlTSelectionValue {
+    /// Redacts `buffer`, since it carries file path(s) that may reveal sensitive information
+    /// about the user's filesystem.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ExternalCtrlTSelectionValue")
             .field("buffer", &"<redacted>")
             .field("token", &self.token)
             .field("session_id", &self.session_id)
