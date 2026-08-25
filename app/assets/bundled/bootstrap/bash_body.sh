@@ -799,6 +799,31 @@ if [ -z "$WARP_BOOTSTRAPPED" ]; then
         READLINE_LINE=""
     }
 
+    # Runs the shell's own ctrl-r history widget (fzf, per the function captured in
+    # $_WARP_EXTERNAL_CTRL_R_WIDGET during bootstrap) as a synthetic foreground command, so Warp's
+    # existing long-running-command machinery hides the input editor and forwards keystrokes to
+    # the widget's PTY-driven UI. Reports the selected command (or an empty buffer, if cancelled)
+    # via the ExternalCtrlRSelection hook so Warp can insert it into the input editor without
+    # executing it. The handoff token given as $1 is echoed back unchanged, so Warp can confirm
+    # the hook is actually the reply to the handoff it started rather than an unrelated write to
+    # the pty.
+    warp_run_external_ctrl_r_widget () {
+        local warp_ctrl_r_token="$1"
+        local result=""
+        case "$_WARP_EXTERNAL_CTRL_R_WIDGET" in
+          *fzf*)
+            # __fzf_history__ (installed by fzf's bash integration) normally writes the selection
+            # into $READLINE_LINE via `bind -x`, using $READLINE_POINT as a sentinel for that
+            # mode. Called here outside of that context, it echoes the selection to stdout
+            # instead -- see fzf's own fallback for that case.
+            result="$(__fzf_history__)"
+            ;;
+        esac
+        local warp_escaped_selection="$(warp_escape_json "$result")"
+        local warp_escaped_token="$(warp_escape_json "$warp_ctrl_r_token")"
+        warp_send_json_message "{ \"hook\": \"ExternalCtrlRSelection\", \"value\": { \"buffer\": \"$warp_escaped_selection\", \"token\": \"$warp_escaped_token\", \"session_id\": $WARP_SESSION_ID } }"
+    }
+
     # Check whether the prompt-related variables have OSC prompt marker sequences,
     # and if not, wrap them with the appropriate markers so that we can direct the
     # prompt bytes to the appropriate grids.
@@ -1357,6 +1382,25 @@ esac
 
     shell_plugins=()
 
+    # Detect whether ctrl-r has been rebound to fzf's bash history widget via `bind -x`, so Warp
+    # can hand ctrl-r off to it at an idle prompt instead of opening Warp's own command search.
+    # Detection is scoped to exactly the tool warp_run_external_ctrl_r_widget above knows how to
+    # invoke: fzf's __fzf_history__ works standalone outside of readline context (see that
+    # function's comment). atuin's bash integration binds ctrl-r indirectly through intermediate
+    # key sequences and depends on the readline widget-chain machinery, so it can't be invoked
+    # the same way and is intentionally not tagged here. Also not supported under MSYS2 (Git Bash
+    # on Windows), where ctrl-r always falls through to Warp's own command search.
+    _WARP_EXTERNAL_CTRL_R_WIDGET=""
+    if [ "$WARP_IN_MSYS2" = false ]; then
+      warp_ctrl_r_binding="$(bind -X 2>/dev/null | command -p sed -n 's/^"\\C-r": "\(.*\)"$/\1/p')"
+      case "$warp_ctrl_r_binding" in
+        *fzf*)
+          _WARP_EXTERNAL_CTRL_R_WIDGET="$warp_ctrl_r_binding"
+          shell_plugins+=(external_ctrl_r_history)
+          ;;
+      esac
+    fi
+
     function warp_bootstrapped () {
         local aliases="`alias`"
         local env_var_names="`compgen -e`"
@@ -1388,8 +1432,13 @@ esac
           shell_plugins+=("starship")
         fi
 
+        # Join into a newline-separated list (one tag per line, matching zsh's `print -l --`)
+        # before escaping -- "$shell_plugins" alone would only expand to the array's first
+        # element.
+        local shell_plugins_list="$(printf '%s\n' "${shell_plugins[@]}")"
+
         if [ "$WARP_IN_MSYS2" = false ]; then
-          local escaped_shell_plugins=$(warp_escape_json "$shell_plugins")
+          local escaped_shell_plugins=$(warp_escape_json "$shell_plugins_list")
           local escaped_path="$(warp_escape_json "$PATH")"
           local escaped_shell_options=$(warp_escape_json "$shell_options")
         fi
@@ -1412,7 +1461,7 @@ esac
           warp_send_hook_kv_pair_escaped "function_names" "$function_names"
           warp_send_hook_kv_pair_escaped "builtins" "$builtins"
           warp_send_hook_kv_pair_escaped "keywords" "$keywords"
-          warp_send_hook_kv_pair "shell_plugins" "$shell_plugins"
+          warp_send_hook_kv_pair_escaped "shell_plugins" "$shell_plugins_list"
           warp_send_hook_kv_pair "shell_version" "$BASH_VERSION"
           warp_send_hook_kv_pair "shell_options" "$shell_options"
           warp_send_hook_kv_pair "rcfiles_start_time" "$rcfiles_start_time"
@@ -1427,7 +1476,7 @@ esac
           local escaped_editor="$(warp_escape_json "$EDITOR")"
           local escaped_shell_path="$(warp_escape_json "$BASH")"
           local escaped_cdpath="$(warp_escape_json "$CDPATH")"
-          local escaped_json="{\"hook\": \"Bootstrapped\", \"value\": {\"histfile\": \"$escaped_histfile\", \"session_id\": $WARP_SESSION_ID, \"shell\": \"bash\",  \"home_dir\": \"$HOME\", \"user\":\"$_user\", \"host\":\"$_hostname\", \"path\": \"$escaped_path\", \"cdpath\": \"$escaped_cdpath\", \"editor\": \"$escaped_editor\", \"env_var_names\": \"$escaped_env_var_names\", \"abbreviations\": \"$escaped_abbrs\", \"aliases\": \"$escaped_aliases\", \"function_names\": \"$escaped_function_names\", \"builtins\": \"$escaped_builtins\", \"keywords\": \"$escaped_keywords\", \"shell_version\": \"$BASH_VERSION\", \"shell_options\": \"$escaped_shell_options\", \"rcfiles_start_time\": \"$rcfiles_start_time\", \"rcfiles_end_time\": \"$rcfiles_end_time\", \"vi_mode_enabled\": \"$vi_mode_enabled\", \"os_category\": \"$os_category\", \"linux_distribution\": \"$linux_distribution\", \"wsl_name\": \"$WSL_DISTRO_NAME\", \"shell_path\": \"$escaped_shell_path\"}}"
+          local escaped_json="{\"hook\": \"Bootstrapped\", \"value\": {\"histfile\": \"$escaped_histfile\", \"session_id\": $WARP_SESSION_ID, \"shell\": \"bash\",  \"home_dir\": \"$HOME\", \"user\":\"$_user\", \"host\":\"$_hostname\", \"path\": \"$escaped_path\", \"cdpath\": \"$escaped_cdpath\", \"editor\": \"$escaped_editor\", \"env_var_names\": \"$escaped_env_var_names\", \"abbreviations\": \"$escaped_abbrs\", \"aliases\": \"$escaped_aliases\", \"function_names\": \"$escaped_function_names\", \"builtins\": \"$escaped_builtins\", \"keywords\": \"$escaped_keywords\", \"shell_version\": \"$BASH_VERSION\", \"shell_options\": \"$escaped_shell_options\", \"rcfiles_start_time\": \"$rcfiles_start_time\", \"rcfiles_end_time\": \"$rcfiles_end_time\", \"shell_plugins\": \"$escaped_shell_plugins\", \"vi_mode_enabled\": \"$vi_mode_enabled\", \"os_category\": \"$os_category\", \"linux_distribution\": \"$linux_distribution\", \"wsl_name\": \"$WSL_DISTRO_NAME\", \"shell_path\": \"$escaped_shell_path\"}}"
           warp_send_json_message "$escaped_json"
         fi
     }
