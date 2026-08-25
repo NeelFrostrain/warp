@@ -582,10 +582,10 @@ function warp_run_external_ctrl_r_widget
       # The invocation is given a leading space (see
       # trigger_external_ctrl_r_history_search), which atuin's own "ignorespace" exclusion
       # honors independent of the fish_should_add_to_history exclusion above (which only keeps
-      # it out of fish's own history), so this should normally be a no-op. Delete it anyway as
-      # a safety net in case that exclusion doesn't apply for some reason; the handoff token
-      # makes the match exact.
-      atuin search --delete -- "warp_run_external_ctrl_r_widget $warp_ctrl_r_token" >/dev/null 2>&1
+      # it out of fish's own history), so atuin never records this invocation into its own
+      # history database in the first place. We deliberately don't try to delete it after the
+      # fact if that exclusion somehow doesn't apply: `atuin search --delete` fuzzy-matches its
+      # query, so it can remove history entries we don't own.
   end
   set -l warp_escaped_selection (warp_escape_json "$result")
   set -l warp_escaped_token (warp_escape_json "$warp_ctrl_r_token")
@@ -650,19 +650,9 @@ function warp_bootstrapped
   set -g _WARP_EXTERNAL_CTRL_R_WIDGET ""
   set -l warp_ctrl_r_widget (warp_external_ctrl_r_widget)
   switch "$warp_ctrl_r_widget"
-    case 'fzf-history-widget'
+    case 'fzf-history-widget' '_atuin_search'
       set -g _WARP_EXTERNAL_CTRL_R_WIDGET "$warp_ctrl_r_widget"
       set -a shell_plugins external_ctrl_r_history
-    case '_atuin_search'
-      set -g _WARP_EXTERNAL_CTRL_R_WIDGET "$warp_ctrl_r_widget"
-      set -a shell_plugins external_ctrl_r_history
-      # atuin records every command into its own history database via its own preexec/precmd
-      # hooks, independent of the fish_should_add_to_history exclusion above, so past handoff
-      # invocations (e.g. from before this cleanup existed, or a session that exited before
-      # warp_run_external_ctrl_r_widget's own cleanup ran) can still be sitting in it. Sweep
-      # those up once per bootstrap; backgrounded since it's pure hygiene and not needed for
-      # the handoff itself to work.
-      atuin search --delete -- "warp_run_external_ctrl_r_widget" >/dev/null 2>&1 &
   end
   set -l escaped_shell_plugins (warp_escape_json $shell_plugins)
 

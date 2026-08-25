@@ -836,10 +836,10 @@ if [ -z "$WARP_BOOTSTRAPPED" ]; then
             # The invocation is given a leading space (see
             # trigger_external_ctrl_r_history_search), which atuin's own "ignorespace"
             # exclusion honors independent of HISTIGNORE (which only keeps it out of bash's own
-            # history), so this should normally be a no-op. Delete it anyway as a safety net in
-            # case that exclusion doesn't apply for some reason; the handoff token makes the
-            # match exact.
-            atuin search --delete -- "warp_run_external_ctrl_r_widget $warp_ctrl_r_token" >/dev/null 2>&1
+            # history), so atuin never records this invocation into its own history database in
+            # the first place. We deliberately don't try to delete it after the fact if that
+            # exclusion somehow doesn't apply: `atuin search --delete` fuzzy-matches its query,
+            # so it can remove history entries we don't own.
             ;;
         esac
         local warp_escaped_selection="$(warp_escape_json "$result")"
@@ -1434,19 +1434,9 @@ esac
     if [ "$WARP_IN_MSYS2" = false ]; then
       warp_ctrl_r_binding="$(bind -X 2>/dev/null | command -p sed -n 's/^"\\C-r": "\(.*\)"$/\1/p')"
       case "$warp_ctrl_r_binding" in
-        __fzf_history__)
+        __fzf_history__|__atuin_history)
           _WARP_EXTERNAL_CTRL_R_WIDGET="$warp_ctrl_r_binding"
           shell_plugins+=(external_ctrl_r_history)
-          ;;
-        __atuin_history)
-          _WARP_EXTERNAL_CTRL_R_WIDGET="$warp_ctrl_r_binding"
-          shell_plugins+=(external_ctrl_r_history)
-          # atuin records every command into its own history database via its own preexec/precmd
-          # hooks, independent of HISTIGNORE, so past handoff invocations (e.g. from before this
-          # cleanup existed, or a session that exited before warp_run_external_ctrl_r_widget's own
-          # cleanup ran) can still be sitting in it. Sweep those up once per bootstrap; backgrounded
-          # since it's pure hygiene and not needed for the handoff itself to work.
-          (atuin search --delete -- "warp_run_external_ctrl_r_widget" >/dev/null 2>&1 &)
           ;;
       esac
     fi
