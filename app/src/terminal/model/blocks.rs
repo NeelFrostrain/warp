@@ -1426,8 +1426,15 @@ impl BlockList {
     pub fn hide_block(&mut self, block_id: &BlockId) {
         if let Some(block) = self.mut_block_from_id(block_id) {
             block.hide();
-            self.update_blocks_and_sumtree(None, None, |_| {}, |_| {});
+        } else {
+            return;
         }
+        self.update_blocks_and_sumtree(None, None, |_| {}, |_| {});
+
+        // update_blocks_and_sumtree doesn't itself trigger a re-draw (its other callers are
+        // driven by a GPUI context that already notifies the right view), so force one here,
+        // matching unhide_block and friends.
+        self.event_proxy.send_wakeup_event();
     }
 
     pub fn is_executing_oz_environment_startup_commands(&self) -> bool {
