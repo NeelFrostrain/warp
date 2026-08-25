@@ -116,6 +116,85 @@ use crate::{
 };
 
 #[test]
+fn external_ctrl_r_selection_matching_session_and_token_is_applied() {
+    let mut pending = Some(PendingCtrlRHandoff {
+        session_id: SessionId::from(1),
+        token: "tok-1".to_string(),
+        restore_text: "draft".to_string(),
+        block_id: BlockId::new(),
+    });
+    PendingCtrlRHandoff::maybe_apply_selection(
+        &mut pending,
+        SessionId::from(1),
+        "tok-1",
+        "echo selected",
+    );
+    assert_eq!(pending.unwrap().restore_text, "echo selected");
+}
+
+#[test]
+fn unsolicited_external_ctrl_r_selection_without_a_pending_handoff_is_ignored() {
+    // No handoff was ever started (e.g. a stray write to the pty unrelated to ctrl-r): there's
+    // nothing to apply the selection to, and no handoff gets created.
+    let mut pending: Option<PendingCtrlRHandoff> = None;
+    PendingCtrlRHandoff::maybe_apply_selection(
+        &mut pending,
+        SessionId::from(1),
+        "tok-1",
+        "echo selected",
+    );
+    assert!(pending.is_none());
+}
+
+#[test]
+fn stale_external_ctrl_r_selection_with_mismatched_token_is_ignored() {
+    let mut pending = Some(PendingCtrlRHandoff {
+        session_id: SessionId::from(1),
+        token: "tok-1".to_string(),
+        restore_text: "draft".to_string(),
+        block_id: BlockId::new(),
+    });
+    PendingCtrlRHandoff::maybe_apply_selection(
+        &mut pending,
+        SessionId::from(1),
+        "some-other-token",
+        "echo selected",
+    );
+    assert_eq!(pending.unwrap().restore_text, "draft");
+}
+
+#[test]
+fn stale_external_ctrl_r_selection_with_mismatched_session_is_ignored() {
+    let mut pending = Some(PendingCtrlRHandoff {
+        session_id: SessionId::from(1),
+        token: "tok-1".to_string(),
+        restore_text: "draft".to_string(),
+        block_id: BlockId::new(),
+    });
+    PendingCtrlRHandoff::maybe_apply_selection(
+        &mut pending,
+        SessionId::from(2),
+        "tok-1",
+        "echo selected",
+    );
+    assert_eq!(pending.unwrap().restore_text, "draft");
+}
+
+#[test]
+fn cancelled_external_ctrl_r_selection_with_empty_buffer_keeps_original_draft() {
+    // An empty buffer means the handoff matched but the user cancelled without selecting
+    // anything, so the originally snapshotted draft text must be preserved, not cleared.
+    let mut pending = Some(PendingCtrlRHandoff {
+        session_id: SessionId::from(1),
+        token: "tok-1".to_string(),
+        restore_text: "draft".to_string(),
+        block_id: BlockId::new(),
+    });
+    PendingCtrlRHandoff::maybe_apply_selection(&mut pending, SessionId::from(1), "tok-1", "");
+    assert_eq!(pending.unwrap().restore_text, "draft");
+}
+
+#[test]
 fn renders_git_checkout_prompt_chip_command_as_single_shell_argument() {
     let command = PromptChipShellCommand::GitCheckout {
         branch_name: "poc;id>/tmp/proof $(whoami) `id` | cat 'tail'".to_string(),

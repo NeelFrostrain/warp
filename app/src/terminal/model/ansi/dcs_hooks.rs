@@ -1001,11 +1001,29 @@ pub struct InputBufferValue {
 /// detected via the `external_ctrl_r_history` [`BootstrappedValue::shell_plugins`] tag) finishes,
 /// reporting the command the user selected. Empty when the user cancelled without selecting
 /// anything. Warp inserts the selection into the input editor without executing it.
-#[derive(Debug, Default, Clone, PartialEq, Eq, Deserialize, Serialize)]
+///
+/// `token` echoes back the handoff token the client sent as an argument to the shell helper that
+/// emits this hook, so the client can verify this is the reply to a handoff it's actually
+/// waiting on rather than an unsolicited or stale write to the pty.
+#[derive(Default, Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub struct ExternalCtrlRSelectionValue {
     pub buffer: String,
     #[serde(default)]
+    pub token: String,
+    #[serde(default)]
     pub session_id: HookSessionId,
+}
+
+impl std::fmt::Debug for ExternalCtrlRSelectionValue {
+    /// Redacts `buffer`, since it carries the shell command the user selected and may contain
+    /// sensitive data (e.g. a secret typed into an earlier command).
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ExternalCtrlRSelectionValue")
+            .field("buffer", &"<redacted>")
+            .field("token", &self.token)
+            .field("session_id", &self.session_id)
+            .finish()
+    }
 }
 
 /// Received from the pty when the terminal screen should be cleared (e.g. via

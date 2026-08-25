@@ -1420,6 +1420,16 @@ impl BlockList {
         }
     }
 
+    /// Hides the given (possibly already-completed) block and refreshes the block heights
+    /// sumtree so the change is reflected immediately, even for a historical block whose height
+    /// entry was already committed to the sumtree.
+    pub fn hide_block(&mut self, block_id: &BlockId) {
+        if let Some(block) = self.mut_block_from_id(block_id) {
+            block.hide();
+            self.update_blocks_and_sumtree(None, None, |_| {}, |_| {});
+        }
+    }
+
     pub fn is_executing_oz_environment_startup_commands(&self) -> bool {
         self.is_executing_oz_environment_startup_commands
     }

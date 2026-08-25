@@ -56,6 +56,7 @@ use serde_json::json;
 use session_sharing_protocol::common::{AgentAttachment, ParticipantId, ServerConversationToken};
 use settings::{Setting as _, ToggleableSetting};
 use string_offset::{ByteOffset, CharOffset};
+use uuid::Uuid;
 use vec1::Vec1;
 use vim::vim::{VimHandler, VimMode};
 use warp_cli::agent::Harness;
@@ -1778,11 +1779,49 @@ pub struct Input {
     /// completes and the buffer would normally be cleared.
     input_contents_before_prompt_chip_command: Option<String>,
 
-    /// Buffer contents to restore into the editor once the synthetic command started by
-    /// [`Self::trigger_external_ctrl_r_history_search`] completes and the buffer would
-    /// otherwise be cleared. Initially the buffer the user had before ctrl-r, overwritten with
-    /// the selected command by [`Self::set_external_ctrl_r_selection`] if the user accepts one.
-    pending_ctrl_r_handoff_restore_text: Option<String>,
+    /// State for an in-flight external ctrl-r handoff started by
+    /// [`Self::trigger_external_ctrl_r_history_search`], if any. `None` once the handoff's block
+    /// has completed (see [`Self::handle_block_completed_event`]) or no handoff is in flight.
+    pending_ctrl_r_handoff: Option<PendingCtrlRHandoff>,
+}
+
+/// State for an in-flight external ctrl-r handoff (see
+/// [`Input::trigger_external_ctrl_r_history_search`]). `session_id` and `token` let
+/// [`Input::set_external_ctrl_r_selection`] verify that an `ExternalCtrlRSelection` hook is
+/// actually the reply to this handoff, rather than an unsolicited write to the pty (e.g. from an
+/// unrelated command) or a stale reply to a handoff whose block has already completed.
+struct PendingCtrlRHandoff {
+    session_id: SessionId,
+    token: String,
+    /// Text to restore into the editor when the handoff's block completes: the buffer the user
+    /// had before ctrl-r, or the selected command once a matching selection is applied.
+    restore_text: String,
+    /// The block running the synthetic helper command. Hidden once it completes (see
+    /// [`Input::handle_block_completed_event`]) so it doesn't clutter scrollback.
+    block_id: BlockId,
+}
+
+impl PendingCtrlRHandoff {
+    /// Applies `selection` to `pending` if it matches an in-flight handoff for `session_id` and
+    /// `token`; otherwise leaves `pending` untouched. This covers both unsolicited selections (no
+    /// handoff was ever started, so `pending` is `None`) and stale ones (a reply to a handoff
+    /// whose block already completed -- clearing `pending` -- or to a different handoff).
+    fn maybe_apply_selection(
+        pending: &mut Option<Self>,
+        session_id: SessionId,
+        token: &str,
+        selection: &str,
+    ) {
+        let Some(handoff) = pending else {
+            return;
+        };
+        if handoff.session_id != session_id || handoff.token != token {
+            return;
+        }
+        if !selection.is_empty() {
+            handoff.restore_text = selection.to_string();
+        }
+    }
 }
 
 struct AmbientAgentViewState {
@@ -4028,7 +4067,7 @@ impl Input {
             cloud_mode_composer_slash_command_data_source,
             ephemeral_message_model,
             input_contents_before_prompt_chip_command: None,
-            pending_ctrl_r_handoff_restore_text: None,
+            pending_ctrl_r_handoff: None,
         };
 
         #[cfg(feature = "local_fs")]
@@ -7507,31 +7546,53 @@ impl Input {
     }
 
     /// Runs `helper_command` (a bootstrap-installed shell function) as if the user had typed and
-    /// submitted it, having snapshotted the current buffer contents so they're restored once the
-    /// command's block completes -- unless [`Self::set_external_ctrl_r_selection`] supplies a
-    /// selected command in the meantime. Returns `true` if the command was started.
+    /// submitted it, passing a freshly generated handoff token as its argument and snapshotting
+    /// the current buffer contents so they're restored once the command's block completes --
+    /// unless [`Self::set_external_ctrl_r_selection`] supplies a selected command in the
+    /// meantime. Returns `true` if the command was started.
     pub fn trigger_external_ctrl_r_history_search(
         &mut self,
         helper_command: &str,
         ctx: &mut ViewContext<Self>,
     ) -> bool {
+        let Some(session_id) = self.active_block_session_id() else {
+            return false;
+        };
         let current_input = self.buffer_text(ctx);
+        let block_id = self.model.lock().block_list().active_block_id().clone();
+        let token = Uuid::new_v4().to_string();
+        let command = format!("{helper_command} {token}");
         let started =
-            self.try_execute_command_from_source(helper_command, CommandExecutionSource::User, ctx);
+            self.try_execute_command_from_source(&command, CommandExecutionSource::User, ctx);
         if started {
-            self.pending_ctrl_r_handoff_restore_text = Some(current_input);
+            self.pending_ctrl_r_handoff = Some(PendingCtrlRHandoff {
+                session_id,
+                token,
+                restore_text: current_input,
+                block_id,
+            });
         }
         started
     }
 
     /// Called when the shell reports the command selected in the external ctrl-r history search
-    /// (fzf/atuin). Overrides the buffer text that will be restored when the synthetic command's
-    /// block completes, so the selection lands in the editor instead of the pre-ctrl-r buffer.
-    /// A no-op if `selection` is empty (the user cancelled without selecting anything).
-    pub fn set_external_ctrl_r_selection(&mut self, selection: &str) {
-        if !selection.is_empty() {
-            self.pending_ctrl_r_handoff_restore_text = Some(selection.to_string());
-        }
+    /// (fzf/atuin). Applies the selection only if `session_id` and `token` match an in-flight
+    /// handoff this session started (see [`PendingCtrlRHandoff`]); otherwise ignores it, including
+    /// unsolicited selections and stale replies to a handoff whose block already completed. A
+    /// no-op on an empty (but matching) `selection` -- the user cancelled without selecting
+    /// anything, so the previously snapshotted buffer stays queued for restoration.
+    pub fn set_external_ctrl_r_selection(
+        &mut self,
+        session_id: SessionId,
+        token: &str,
+        selection: &str,
+    ) {
+        PendingCtrlRHandoff::maybe_apply_selection(
+            &mut self.pending_ctrl_r_handoff,
+            session_id,
+            token,
+            selection,
+        );
     }
 
     fn try_execute_command_with_options(
@@ -15271,11 +15332,23 @@ impl Input {
                 && !self.has_queued_command_in_flight(ctx);
             let latest_block_id = self.model.lock().block_list().active_block_id().clone();
             // Prefer a prompt-chip restore (e.g. `cd`) over a ctrl-r handoff restore; the two
-            // cannot both be pending for the same block in practice.
+            // cannot both be pending for the same block in practice. Taking
+            // `pending_ctrl_r_handoff` here also ends that handoff: any `ExternalCtrlRSelection`
+            // hook that arrives after this point is treated as stale and ignored (see
+            // `PendingCtrlRHandoff`).
+            let completed_ctrl_r_handoff = self
+                .pending_ctrl_r_handoff
+                .take_if(|handoff| handoff.block_id == block_completed_event.block_id);
+            if let Some(handoff) = &completed_ctrl_r_handoff {
+                self.model
+                    .lock()
+                    .block_list_mut()
+                    .hide_block(&handoff.block_id);
+            }
             let pending_input_restore = self
                 .input_contents_before_prompt_chip_command
                 .take()
-                .or_else(|| self.pending_ctrl_r_handoff_restore_text.take());
+                .or_else(|| completed_ctrl_r_handoff.map(|handoff| handoff.restore_text));
 
             if should_clear_buffer {
                 // We want to reinitialize the buffer whenever a command is completed so that

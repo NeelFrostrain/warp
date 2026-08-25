@@ -12974,9 +12974,13 @@ impl TerminalView {
                 }
             }
             ModelEvent::ExternalCtrlRSelection(data) => {
-                self.input.update(ctx, |input, _ctx| {
-                    input.set_external_ctrl_r_selection(&data.buffer);
-                });
+                if FeatureFlag::FzfCtrlRHandoff.is_enabled()
+                    && let Some(session_id) = data.session_id.map(SessionId::from)
+                {
+                    self.input.update(ctx, |input, _ctx| {
+                        input.set_external_ctrl_r_selection(session_id, &data.token, &data.buffer);
+                    });
+                }
             }
             ModelEvent::SelectedTextChanged => {
                 ctx.emit(Event::SelectedTextChanged);

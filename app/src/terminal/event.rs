@@ -536,7 +536,13 @@ impl Debug for Event {
             }
             Event::FinishUpdate(data) => write!(f, "FinishUpdate({})", data.update_id),
             Event::ExternalCtrlRSelection(data) => {
-                write!(f, "ExternalCtrlRSelection(buffer: {:?})", data.buffer)
+                // The buffer is a selected shell command, which may carry a credential; log only
+                // its length rather than its contents.
+                write!(
+                    f,
+                    "ExternalCtrlRSelection(buffer_len: {})",
+                    data.buffer.len()
+                )
             }
             Event::TextSelectionChanged => write!(f, "TextSelectionChanged"),
             Event::ShellSpawned(shell_type) => write!(f, "ShellSpawned({shell_type:?})"),
