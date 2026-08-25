@@ -409,10 +409,11 @@ impl UsagePopoverView {
         column.finish()
     }
 
-    /// Renders a per-model row. When the model has a known charged-usage
-    /// breakdown, the row is clickable (a leading chevron indicates this)
-    /// and toggles an input/output/cache/web-search breakdown subsection
-    /// beneath it.
+    /// Renders a per-model row. Every row is clickable (a leading chevron
+    /// indicates this) and toggles a breakdown subsection beneath it — an
+    /// input/output/cache/web-search split when the model has a known
+    /// charged-usage breakdown, or a fallback message when it doesn't (e.g.
+    /// the server hasn't sent per-model charges for this conversation yet).
     fn render_model_usage_row(
         &self,
         row: &ModelUsageRow,
@@ -428,31 +429,29 @@ impl UsagePopoverView {
             Some(role) => format!("{} ({role})", row.model_id),
             None => row.model_id.clone(),
         };
-        let mut left = Flex::row()
+        let chevron_color = blended_colors::text_disabled(theme, background);
+        let chevron_icon = if expanded {
+            Icon::ChevronDown
+        } else {
+            Icon::ChevronRight
+        };
+        let left = Flex::row()
             .with_cross_axis_alignment(CrossAxisAlignment::Center)
-            .with_spacing(7.);
-        if row.charged_usage.is_some() {
-            let chevron_color = blended_colors::text_disabled(theme, background);
-            let chevron_icon = if expanded {
-                Icon::ChevronDown
-            } else {
-                Icon::ChevronRight
-            };
-            left.add_child(
+            .with_spacing(7.)
+            .with_child(
                 ConstrainedBox::new(chevron_icon.to_warpui_icon(chevron_color.into()).finish())
                     .with_width(10.)
                     .with_height(10.)
                     .finish(),
+            )
+            .with_child(render_swatch(color))
+            .with_child(
+                Text::new(label, appearance.ui_font_family(), font_size)
+                    .with_color(blended_colors::text_main(theme, background))
+                    .soft_wrap(false)
+                    .with_clip(ClipConfig::ellipsis())
+                    .finish(),
             );
-        }
-        left.add_child(render_swatch(color));
-        left.add_child(
-            Text::new(label, appearance.ui_font_family(), font_size)
-                .with_color(blended_colors::text_main(theme, background))
-                .soft_wrap(false)
-                .with_clip(ClipConfig::ellipsis())
-                .finish(),
-        );
 
         let value = Text::new(
             format_tokens_and_cost(Some(row.tokens), row.cost_in_cents),
@@ -467,17 +466,19 @@ impl UsagePopoverView {
             .with_child(value)
             .finish();
 
-        let Some(charged_usage) = row.charged_usage else {
-            return summary_row;
-        };
-
         let mut column = Flex::column().with_spacing(6.).with_child(summary_row);
         if expanded {
-            column.add_child(
-                Container::new(render_charged_usage_breakdown(&charged_usage, appearance))
-                    .with_padding_left(15.)
-                    .finish(),
-            );
+            let breakdown = match row.charged_usage {
+                Some(charged_usage) => render_charged_usage_breakdown(&charged_usage, appearance),
+                None => Text::new(
+                    "No detailed breakdown available yet".to_string(),
+                    appearance.ui_font_family(),
+                    font_size,
+                )
+                .with_color(blended_colors::text_disabled(theme, background))
+                .finish(),
+            };
+            column.add_child(Container::new(breakdown).with_padding_left(15.).finish());
         }
 
         let model_id = row.model_id.clone();
