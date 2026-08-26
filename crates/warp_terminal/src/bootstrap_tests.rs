@@ -211,6 +211,34 @@ fn run_bash(script: &str) -> Option<String> {
     Some(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
+/// Bash's major version (`${BASH_VERSINFO[0]}`), or `None` if bash isn't installed at all --
+/// mirroring `run_bash`'s "shell missing" skip convention for callers that also need to skip on
+/// an installed-but-too-old bash (see `bash_ctrl_t_detection_snippet`'s callers below).
+fn bash_major_version() -> Option<u32> {
+    let output = command::blocking::Command::new("bash")
+        .args([
+            "--noprofile",
+            "--norc",
+            "-c",
+            "echo \"${BASH_VERSINFO[0]}\"",
+        ])
+        .output()
+        .ok()?;
+    String::from_utf8_lossy(&output.stdout).trim().parse().ok()
+}
+
+/// `bind -X` (list `-x` bindings), which this detection depends on entirely, doesn't exist in
+/// bash's readline before bash 4.0 -- it errors out silently here (stderr is redirected away),
+/// leaving detection permanently empty. That's a real, accepted limitation of the feature itself
+/// on bash < 4 (notably macOS's system bash 3.2; see the PR's "Known limitations"), not something
+/// a test workaround should paper over: on such a bash, both of the tests below would either fail
+/// (the "tags" case) or pass vacuously without exercising the absent-function branch at all (the
+/// "declines" case just happens to expect the same empty result `bind -X`'s absence always
+/// produces). Skip both rather than let the latter masquerade as real coverage.
+fn bash_supports_bind_dash_capital_x() -> Option<bool> {
+    Some(bash_major_version()? >= 4)
+}
+
 /// Regression test for the ctrl-t equivalent of bash's `declare -F __atuin_history` guard on the
 /// ctrl-r path: detection must decline (no tag, no interception) when the picker function
 /// `warp_run_external_ctrl_t_widget` calls -- `__fzf_select__` -- isn't actually defined, even
@@ -219,6 +247,9 @@ fn run_bash(script: &str) -> Option<String> {
 /// and intercepted with nothing to invoke, swallowing the key instead of leaving it alone.
 #[test]
 fn test_bash_ctrl_t_detection_declines_when_picker_function_is_absent() {
+    if bash_supports_bind_dash_capital_x() == Some(false) {
+        return;
+    }
     let detection = bash_ctrl_t_detection_snippet();
     let script = format!(
         r#"
@@ -238,6 +269,9 @@ printf 'widget=[%s] plugins=[%s]\n' "$_WARP_EXTERNAL_CTRL_T_WIDGET" "${{shell_pl
 
 #[test]
 fn test_bash_ctrl_t_detection_tags_when_picker_function_is_present() {
+    if bash_supports_bind_dash_capital_x() == Some(false) {
+        return;
+    }
     let detection = bash_ctrl_t_detection_snippet();
     let script = format!(
         r#"
