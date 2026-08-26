@@ -643,15 +643,15 @@ function warp_run_external_ctrl_t_widget
       set -l original_line ''
       set -l char_cursor 0
       if test -f "$draft_file"
-        set -l draft_contents (command cat -- "$draft_file")
-        set char_cursor $draft_contents[1]
-        # The remaining lines are the draft verbatim: rejoining with the same separator the
-        # command-substitution split on above losslessly reconstructs it, embedded newlines
-        # included, since the file has no trailing newline for fish to have dropped. Piped
-        # through `string collect`, since otherwise the newline just reintroduced would make
-        # this `set`'s own command substitution re-split the joined string right back into a
-        # list.
-        set original_line (string join \n -- $draft_contents[2..] | string collect)
+        # NUL-delimited (see Input::write_ctrl_t_draft_file), not newline-delimited: a plain
+        # command substitution unconditionally strips trailing newline bytes from what it
+        # captures before any splitting happens, which would silently lose a trailing newline
+        # that's genuinely part of the draft. `string split0` splits on NUL only, so
+        # $draft_fields[2] is the draft verbatim -- embedded and trailing newlines included --
+        # with no further reconstruction needed.
+        set -l draft_fields (command cat -- "$draft_file" | string split0)
+        set char_cursor $draft_fields[1]
+        set original_line $draft_fields[2]
       end
       commandline -r -- $original_line
       commandline -C -- $char_cursor

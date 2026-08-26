@@ -1911,10 +1911,15 @@ fn ctrl_t_draft_file_path(token: &str) -> PathBuf {
 ///
 /// Created with owner-only (0600) permissions from the moment the file exists -- this may contain
 /// in-progress command text the user hasn't run yet, and creating the file before restricting its
-/// permissions would leave a window where another local user could read it. The first line is
+/// permissions would leave a window where another local user could read it. The format is
+/// `{char_cursor}\0{original_buffer}\0` -- NUL-delimited, not newline-delimited, because the fish
+/// reader captures the file through a plain command substitution, which unconditionally strips
+/// trailing newline bytes from what it captures before any splitting happens; a newline-delimited
+/// format would silently lose a trailing newline that's genuinely part of the draft. A shell
+/// command buffer cannot itself contain a NUL byte, so it's an unambiguous delimiter fish can
+/// split back out with `string split0` unaffected by that stripping. `char_cursor` is
 /// `cursor_offset` converted to a character offset, since fish's `commandline -C` takes
-/// characters while `cursor_offset` is a byte offset; the remainder of the file is
-/// `original_buffer` verbatim.
+/// characters while `cursor_offset` is a byte offset.
 fn write_ctrl_t_draft_file(
     token: &str,
     original_buffer: &str,
@@ -1927,8 +1932,9 @@ fn write_ctrl_t_draft_file(
         original_buffer,
         cursor_offset,
         |file, char_cursor, original_buffer| {
-            writeln!(file, "{char_cursor}")?;
-            file.write_all(original_buffer.as_bytes())
+            write!(file, "{char_cursor}\0")?;
+            file.write_all(original_buffer.as_bytes())?;
+            file.write_all(b"\0")
         },
     )
 }

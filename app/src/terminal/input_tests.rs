@@ -2332,16 +2332,17 @@ fn write_ctrl_t_draft_file_converts_byte_cursor_to_char_cursor_for_multi_byte_dr
     let contents = std::fs::read_to_string(&path).expect("draft file should have been written");
     std::fs::remove_file(&path).ok();
 
-    let mut lines = contents.splitn(2, '\n');
+    let (cursor_field, rest) = contents
+        .split_once('\0')
+        .expect("the draft file must be NUL-delimited");
     assert_eq!(
-        lines.next(),
-        Some("5"),
+        cursor_field, "5",
         "the cursor must be written as a character offset, not the byte offset"
     );
     assert_eq!(
-        lines.next(),
+        rest.strip_suffix('\0'),
         Some(original_buffer),
-        "the draft line must be written verbatim"
+        "the draft must be written verbatim, NUL-terminated"
     );
 }
 

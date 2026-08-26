@@ -477,18 +477,28 @@ fn fish_ctrl_t_draft_decode_snippet() -> &'static str {
     &FISH_SH[start..start + end + end_marker.len()]
 }
 
+/// Writes a NUL-delimited draft file matching [`Input::write_ctrl_t_draft_file`]'s format
+/// (`{char_cursor}\0{draft}\0`) directly, rather than going through the Rust writer, so these
+/// fish-side decode tests exercise exactly the bytes fish reads without depending on the writer
+/// under a separate set of tests.
+fn write_decode_test_draft_file(char_cursor: u32, draft: &str) -> std::path::PathBuf {
+    let draft_file =
+        std::env::temp_dir().join(format!("warp-ctrl-t-decode-test-{}", uuid::Uuid::new_v4()));
+    std::fs::write(&draft_file, format!("{char_cursor}\0{draft}\0"))
+        .expect("should write test draft file");
+    draft_file
+}
+
 /// Regression test for the fish decode path (`warp_run_external_ctrl_t_widget` reading back the
 /// draft file), not just the Rust file writer: a multiline in-progress command must survive
-/// reconstruction intact. fish's command substitution splits `cat`'s output into a list by
-/// newline, so rejoining it without `string collect` (see the comment on `warp_ctrl_t_widget`'s
-/// reconstruction line) silently drops the embedded newline back out -- exercising only the write
+/// reconstruction intact. An unquoted command substitution splits `cat`'s output into a list by
+/// newline, so reconstructing that split without care (see the comment on `warp_ctrl_t_widget`'s
+/// reconstruction line) can silently drop embedded newlines back out -- exercising only the write
 /// side can never catch that, since the bug is entirely in how fish re-reads what was written.
 #[test]
 fn test_fish_ctrl_t_draft_decode_preserves_multiline_drafts() {
     let decode_snippet = fish_ctrl_t_draft_decode_snippet();
-    let draft_file =
-        std::env::temp_dir().join(format!("warp-ctrl-t-decode-test-{}", uuid::Uuid::new_v4()));
-    std::fs::write(&draft_file, "8\necho one\necho two").expect("should write test draft file");
+    let draft_file = write_decode_test_draft_file(8, "echo one\necho two");
     let draft_file_path = draft_file.display().to_string();
     let script = format!(
         r#"
@@ -510,6 +520,37 @@ printf 'original_line=[%s]\n' "$original_line"
         stdout.contains("original_line=[echo one\necho two]"),
         "{stdout}"
     );
+}
+
+/// Regression test for a draft whose *last* character is a newline (e.g. a trailing blank line
+/// mid-multiline edit): a plain command substitution -- `(command cat -- $draft_file)` --
+/// unconditionally strips trailing newline bytes from what it captures before any splitting
+/// happens, which is exactly why the decode format is NUL-delimited (see
+/// `Input::write_ctrl_t_draft_file`) rather than reconstructed from a newline-split list. The
+/// multiline test above only covers an *embedded* newline, which that stripping doesn't touch --
+/// this is the case it would silently corrupt.
+#[test]
+fn test_fish_ctrl_t_draft_decode_preserves_trailing_newline() {
+    let decode_snippet = fish_ctrl_t_draft_decode_snippet();
+    let draft_file = write_decode_test_draft_file(3, "echo hi\n");
+    let draft_file_path = draft_file.display().to_string();
+    let script = format!(
+        r#"
+set -l draft_file '{draft_file_path}'
+set -l char_cursor 0
+set -l original_line ''
+{decode_snippet}
+printf 'char_cursor=[%s]\n' "$char_cursor"
+printf 'original_line=[%s]\n' "$original_line"
+"#
+    );
+    let stdout = run_fish(&script);
+    std::fs::remove_file(&draft_file).ok();
+    let Some(stdout) = stdout else {
+        return;
+    };
+    assert!(stdout.contains("char_cursor=[3]"), "{stdout}");
+    assert!(stdout.contains("original_line=[echo hi\n]"), "{stdout}");
 }
 
 fn fish_ctrl_t_widget_runner_fn() -> &'static str {
@@ -587,10 +628,15 @@ warp_run_external_ctrl_t_widget test-token
     )
 }
 
-fn write_ctrl_t_test_draft(xdg_runtime_dir: &std::path::Path, contents: &str) {
+/// Writes a NUL-delimited draft file matching [`Input::write_ctrl_t_draft_file`]'s format (see
+/// `write_decode_test_draft_file` above) at the path the widget under test will look for.
+fn write_ctrl_t_test_draft(xdg_runtime_dir: &std::path::Path, char_cursor: u32, draft: &str) {
     std::fs::create_dir_all(xdg_runtime_dir).expect("should create test XDG_RUNTIME_DIR");
-    std::fs::write(xdg_runtime_dir.join("warp-ctrl-t-test-token"), contents)
-        .expect("should write test draft file");
+    std::fs::write(
+        xdg_runtime_dir.join("warp-ctrl-t-test-token"),
+        format!("{char_cursor}\0{draft}\0"),
+    )
+    .expect("should write test draft file");
 }
 
 /// Regression test for the `(commandline | string collect)` argument at the widget's
@@ -602,7 +648,7 @@ fn write_ctrl_t_test_draft(xdg_runtime_dir: &std::path::Path, contents: &str) {
 fn test_fish_ctrl_t_widget_reports_full_multiline_change_without_truncation() {
     let xdg_runtime_dir =
         std::env::temp_dir().join(format!("warp-ctrl-t-widget-test-{}", uuid::Uuid::new_v4()));
-    write_ctrl_t_test_draft(&xdg_runtime_dir, "10\necho START\nMIDDLE");
+    write_ctrl_t_test_draft(&xdg_runtime_dir, 10, "echo START\nMIDDLE");
     let script = fish_ctrl_t_widget_test_script(
         &xdg_runtime_dir.display().to_string(),
         "commandline -r -- (printf 'echo START\\nMIDDLE nested.rs ' | string collect)",
@@ -627,7 +673,7 @@ fn test_fish_ctrl_t_widget_reports_full_multiline_change_without_truncation() {
 fn test_fish_ctrl_t_widget_reports_empty_when_multiline_draft_is_left_unchanged() {
     let xdg_runtime_dir =
         std::env::temp_dir().join(format!("warp-ctrl-t-widget-test-{}", uuid::Uuid::new_v4()));
-    write_ctrl_t_test_draft(&xdg_runtime_dir, "10\necho START\nMIDDLE");
+    write_ctrl_t_test_draft(&xdg_runtime_dir, 10, "echo START\nMIDDLE");
     let script =
         fish_ctrl_t_widget_test_script(&xdg_runtime_dir.display().to_string(), "# cancelled");
     let stdout = run_fish(&script);
