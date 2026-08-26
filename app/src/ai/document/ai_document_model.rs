@@ -160,18 +160,13 @@ pub enum AIDocumentUpdateSource {
     Restoration,
 }
 
-/// When a document's editor lays out its content.
-///
-/// Laying out a markdown document means font-shaping every block, which is the single most
-/// expensive thing an editor does, so it is worth skipping for content that will never be shown.
+/// Whether a document's editor lays its content out up front or on first render.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum EditorLayoutTiming {
-    /// Lay out as soon as the content is set. Use for documents that are about to be displayed.
-    OnCreate,
-    /// Defer layout until the editor is first rendered. Use for documents rehydrated in bulk:
-    /// conversation restore replays every revision of every plan document, and all but the newest
-    /// are reachable only through version history.
-    OnFirstRender,
+enum LayoutTiming {
+    /// Lay out whenever the content changes.
+    Eager,
+    /// Defer layout to the first render, so content that is never opened is never font-shaped.
+    Lazy,
 }
 
 /// Queued plan-card edit; cleared once it piggybacks onto an outbound query.
@@ -544,7 +539,7 @@ impl AIDocumentModel {
             conversation_id,
             file_link_resolution_context,
             Local::now(),
-            EditorLayoutTiming::OnCreate,
+            LayoutTiming::Eager,
             ctx,
         );
         id
@@ -569,8 +564,8 @@ impl AIDocumentModel {
             conversation_id,
             file_link_resolution_context,
             Local::now(),
-            // This document is being opened from Warp Drive, so it is about to be displayed.
-            EditorLayoutTiming::OnCreate,
+            // Hydrated in response to a user opening the plan, so it is about to be displayed.
+            LayoutTiming::Eager,
             ctx,
         );
 
@@ -634,7 +629,6 @@ impl AIDocumentModel {
         Ok(())
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn create_document_internal(
         &mut self,
         id: AIDocumentId,
@@ -644,7 +638,7 @@ impl AIDocumentModel {
         conversation_id: AIConversationId,
         file_link_resolution_context: Option<FileLinkResolutionContext>,
         created_at: DateTime<Local>,
-        layout_timing: EditorLayoutTiming,
+        layout_timing: LayoutTiming,
         ctx: &mut ModelContext<Self>,
     ) {
         let editor =
@@ -712,7 +706,7 @@ impl AIDocumentModel {
             file_link_resolution_context,
             Local::now(),
             // Streaming plans auto-open their pane, so this content is about to be displayed.
-            EditorLayoutTiming::OnCreate,
+            LayoutTiming::Eager,
             ctx,
         );
         self.streaming_create_documents.insert(key, id);
@@ -976,7 +970,7 @@ impl AIDocumentModel {
                 AIConversationId::new(),
                 None,
                 Local::now(),
-                EditorLayoutTiming::OnFirstRender,
+                LayoutTiming::Lazy,
                 ctx,
             );
             return;
@@ -1033,7 +1027,7 @@ impl AIDocumentModel {
     fn create_editor_model(
         content: impl Into<String>,
         file_link_resolution_context: Option<FileLinkResolutionContext>,
-        layout_timing: EditorLayoutTiming,
+        layout_timing: LayoutTiming,
         ctx: &mut ModelContext<Self>,
     ) -> ModelHandle<NotebooksEditorModel> {
         ctx.add_model(|ctx| {
@@ -1044,10 +1038,8 @@ impl AIDocumentModel {
             let styles = rich_text_styles(appearance, font_settings);
 
             let mut model = match layout_timing {
-                EditorLayoutTiming::OnCreate => NotebooksEditorModel::new_unbound(styles, ctx),
-                EditorLayoutTiming::OnFirstRender => {
-                    NotebooksEditorModel::new_unbound_lazy(styles, ctx)
-                }
+                LayoutTiming::Eager => NotebooksEditorModel::new_unbound(styles, ctx),
+                LayoutTiming::Lazy => NotebooksEditorModel::new_unbound_lazy(styles, ctx),
             };
             model.set_default_mermaid_display_mode(MarkdownDisplayMode::Rendered, ctx);
             model.set_file_link_resolution_context(file_link_resolution_context);
@@ -1076,12 +1068,11 @@ impl AIDocumentModel {
             .as_ref(ctx)
             .file_link_resolution_context()
             .cloned();
-        // This editor only backs the archived revision, which is reachable solely through version
-        // history, so there is no reason to lay it out until someone actually opens it.
+        // Archived revisions are reachable only through version history, and are rarely opened.
         let editor = Self::create_editor_model(
             doc.editor.as_ref(ctx).markdown_unescaped(ctx),
             file_link_resolution_context,
-            EditorLayoutTiming::OnFirstRender,
+            LayoutTiming::Lazy,
             ctx,
         );
 
@@ -1149,7 +1140,7 @@ impl AIDocumentModel {
             conversation_id,
             None,
             created_at,
-            EditorLayoutTiming::OnFirstRender,
+            LayoutTiming::Lazy,
             ctx,
         );
 

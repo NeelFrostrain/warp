@@ -1518,15 +1518,14 @@ fn test_debounced_resizes() {
     });
 }
 
-/// Creates an unbound editor containing one code block, binds it to a window, and drives the
-/// viewport report that a first real layout produces. Returns the number of [`NotebookCommand`]
-/// child models afterward.
+/// The number of [`NotebookCommand`] child models an editor holds once it has been bound to a
+/// window and laid out for the first time, having been created unbound as conversation restore
+/// does.
 ///
 /// `handle_render_model_event` drops render events while `rte_window_id` is `None`, so the
-/// `LayoutUpdated` emitted when content is first set never reaches `child_models` — that holds
-/// whether or not layout is deferred. Recovery comes from the first layout reporting a viewport
-/// width change, which drives a debounced `rebuild_layout` whose buffer edit emits a second
-/// `LayoutUpdated`.
+/// `LayoutUpdated` emitted when content is first set never reaches `child_models`, deferred layout
+/// or not. Recovery comes from the first layout reporting a viewport width change, which drives a
+/// debounced `rebuild_layout` whose buffer edit emits a second `LayoutUpdated`.
 async fn child_models_after_binding_unbound_editor(app: &mut App, defer_layout: bool) -> usize {
     initialize_deps(app);
     let window = setup_editor_window(app, true);
@@ -1580,6 +1579,7 @@ async fn child_models_after_binding_unbound_editor(app: &mut App, defer_layout: 
     command_models(&model, app).len()
 }
 
+/// Control for [`test_deferred_layout_populates_child_models_after_binding`].
 #[test]
 fn test_eager_layout_populates_child_models_after_binding() {
     App::test((), |mut app| async move {

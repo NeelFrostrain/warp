@@ -168,12 +168,11 @@ impl NotebooksEditorModel {
         Self::new_internal(text_styles, None, false, ctx)
     }
 
-    /// Like [`Self::new_unbound`], but defers text layout until the editor's element is first
-    /// laid out.
+    /// Like [`Self::new_unbound`], but defers text layout until the editor's element is first laid
+    /// out.
     ///
-    /// Font shaping a whole markdown document is expensive, and callers that rehydrate documents
-    /// in bulk (conversation restore replays every document revision) would otherwise pay it for
-    /// content that is never displayed.
+    /// Font shaping a whole markdown document is expensive enough to be worth skipping entirely
+    /// for content that may never be displayed.
     pub fn new_unbound_lazy(text_styles: RichTextStyles, ctx: &mut ModelContext<Self>) -> Self {
         Self::new_internal(text_styles, None, true, ctx)
     }
