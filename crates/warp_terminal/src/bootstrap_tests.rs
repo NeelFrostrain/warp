@@ -211,37 +211,35 @@ fn run_bash(script: &str) -> Option<String> {
     Some(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
-/// Bash's `(major, minor)` version, or `None` if bash isn't installed at all -- mirroring
-/// `run_bash`'s "shell missing" skip convention for callers that also need to skip on an
-/// installed-but-too-old bash. The minor version matters here, not just the major: see
-/// `bash_supports_bind_dash_capital_x` below.
-fn bash_version() -> Option<(u32, u32)> {
-    let output = command::blocking::Command::new("bash")
+/// Whether this environment's bash can round-trip a `bind -x` binding back out through `bind -X`,
+/// invoked exactly as the tests below invoke it. `None` if bash isn't installed at all, mirroring
+/// `run_bash`'s "shell missing" skip convention.
+///
+/// The detection under test depends on that round-trip entirely, and it does not hold everywhere:
+/// `bind -X` only arrived in bash 4.3 (NEWS-4.3 item q), and even where it exists a
+/// non-interactive shell need not have line editing enabled, in which case the binding is never
+/// listable. Both show up identically here -- an empty listing -- so this probes the capability
+/// rather than inferring it from a version, which would miss the second case entirely.
+///
+/// Where the round-trip fails, the two tests below would either fail (the "tags" case) or pass
+/// vacuously without exercising the absent-function branch at all (the "declines" case just
+/// happens to expect the same empty result an unusable `bind -X` always produces). Skip both
+/// rather than let the latter masquerade as real coverage.
+fn bash_can_round_trip_bind_dash_x() -> Option<bool> {
+    let output = match command::blocking::Command::new("bash")
         .args([
             "--noprofile",
             "--norc",
             "-c",
-            "echo \"${BASH_VERSINFO[0]} ${BASH_VERSINFO[1]}\"",
+            "bind -x '\"\\C-t\": warp_bind_x_probe' 2>/dev/null; bind -X 2>/dev/null",
         ])
         .output()
-        .ok()?;
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let mut fields = stdout.split_whitespace();
-    let major = fields.next()?.parse().ok()?;
-    let minor = fields.next()?.parse().ok()?;
-    Some((major, minor))
-}
-
-/// `bind -X` (list `-x` bindings), which this detection depends on entirely, was added in bash
-/// 4.3 (NEWS-4.3 item q) -- on anything older it errors out silently here (stderr is redirected
-/// away), leaving detection permanently empty. That's a real, accepted limitation of the feature
-/// itself on those versions (notably macOS's system bash 3.2; see the PR's "Known limitations"),
-/// not something a test workaround should paper over: on such a bash, both of the tests below
-/// would either fail (the "tags" case) or pass vacuously without exercising the absent-function
-/// branch at all (the "declines" case just happens to expect the same empty result `bind -X`'s
-/// absence always produces). Skip both rather than let the latter masquerade as real coverage.
-fn bash_supports_bind_dash_capital_x() -> Option<bool> {
-    Some(bash_version()? >= (4, 3))
+    {
+        Ok(output) => output,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return None,
+        Err(error) => panic!("failed to run bash: {error}"),
+    };
+    Some(String::from_utf8_lossy(&output.stdout).contains("warp_bind_x_probe"))
 }
 
 /// Regression test for the ctrl-t equivalent of bash's `declare -F __atuin_history` guard on the
@@ -252,7 +250,7 @@ fn bash_supports_bind_dash_capital_x() -> Option<bool> {
 /// and intercepted with nothing to invoke, swallowing the key instead of leaving it alone.
 #[test]
 fn test_bash_ctrl_t_detection_declines_when_picker_function_is_absent() {
-    if bash_supports_bind_dash_capital_x() == Some(false) {
+    if bash_can_round_trip_bind_dash_x() == Some(false) {
         return;
     }
     let detection = bash_ctrl_t_detection_snippet();
@@ -274,7 +272,7 @@ printf 'widget=[%s] plugins=[%s]\n' "$_WARP_EXTERNAL_CTRL_T_WIDGET" "${{shell_pl
 
 #[test]
 fn test_bash_ctrl_t_detection_tags_when_picker_function_is_present() {
-    if bash_supports_bind_dash_capital_x() == Some(false) {
+    if bash_can_round_trip_bind_dash_x() == Some(false) {
         return;
     }
     let detection = bash_ctrl_t_detection_snippet();
