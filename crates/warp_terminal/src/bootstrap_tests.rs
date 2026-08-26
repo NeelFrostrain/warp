@@ -211,35 +211,49 @@ fn run_bash(script: &str) -> Option<String> {
     Some(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
-/// Whether this environment's bash can round-trip a `bind -x` binding back out through `bind -X`,
-/// invoked exactly as the tests below invoke it. `None` if bash isn't installed at all, mirroring
-/// `run_bash`'s "shell missing" skip convention.
+/// The `bind -X` extraction pipeline the ctrl-t detection is built on, mirrored from
+/// `bash_body.sh` so the gate below can exercise the same capability the detection needs.
+/// `bash_can_extract_ctrl_t_binding` asserts the snippet still contains this, so the two cannot
+/// drift apart silently.
+const BIND_DASH_X_EXTRACTION: &str =
+    r#"bind -X 2>/dev/null | command -p sed -n 's/^"\\C-t": "\(.*\)"$/\1/p'"#;
+
+/// Whether this environment can read a `bind -x` binding back out through the pipeline above, run
+/// the way the tests below run it. `None` if bash isn't installed at all, mirroring `run_bash`'s
+/// "shell missing" skip convention.
 ///
-/// The detection under test depends on that round-trip entirely, and it does not hold everywhere:
-/// `bind -X` only arrived in bash 4.3 (NEWS-4.3 item q), and even where it exists a
-/// non-interactive shell need not have line editing enabled, in which case the binding is never
-/// listable. Both show up identically here -- an empty listing -- so this probes the capability
-/// rather than inferring it from a version, which would miss the second case entirely.
+/// Detection depends on that end-to-end, and it does not hold everywhere. Three separate things
+/// can break it, all presenting identically as empty output: `bind -X` only arrived in bash 4.3
+/// (NEWS-4.3 item q); a non-interactive shell need not have line editing enabled, so the binding
+/// is never listable however new bash is; and `command -p` forces the system utility PATH, so the
+/// extraction runs under BSD sed on macOS rather than GNU sed. Probing the pipeline covers all
+/// three, where checking a version covers only the first and checking a raw listing only the
+/// first two.
 ///
-/// Where the round-trip fails, the two tests below would either fail (the "tags" case) or pass
-/// vacuously without exercising the absent-function branch at all (the "declines" case just
-/// happens to expect the same empty result an unusable `bind -X` always produces). Skip both
-/// rather than let the latter masquerade as real coverage.
-fn bash_can_round_trip_bind_dash_x() -> Option<bool> {
+/// Deliberately probes with a sentinel widget name rather than `fzf-file-widget`, so it tests the
+/// capability without also asserting the `case` match the tests below exist to check -- otherwise
+/// the gate would subsume the assertion and the tests could never fail.
+///
+/// Where extraction fails, those tests would either fail (the "tags" case) or pass vacuously
+/// without exercising the absent-function branch at all (the "declines" case just happens to
+/// expect the same empty result unusable extraction always produces). Skip both rather than let
+/// the latter masquerade as real coverage.
+fn bash_can_extract_ctrl_t_binding() -> Option<bool> {
+    assert!(
+        bash_ctrl_t_detection_snippet().contains(BIND_DASH_X_EXTRACTION),
+        "BIND_DASH_X_EXTRACTION no longer matches bash_body.sh's detection pipeline"
+    );
+    let script =
+        format!("bind -x '\"\\C-t\": warp_bind_x_probe' 2>/dev/null; {BIND_DASH_X_EXTRACTION}");
     let output = match command::blocking::Command::new("bash")
-        .args([
-            "--noprofile",
-            "--norc",
-            "-c",
-            "bind -x '\"\\C-t\": warp_bind_x_probe' 2>/dev/null; bind -X 2>/dev/null",
-        ])
+        .args(["--noprofile", "--norc", "-c", &script])
         .output()
     {
         Ok(output) => output,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return None,
         Err(error) => panic!("failed to run bash: {error}"),
     };
-    Some(String::from_utf8_lossy(&output.stdout).contains("warp_bind_x_probe"))
+    Some(String::from_utf8_lossy(&output.stdout).trim() == "warp_bind_x_probe")
 }
 
 /// Regression test for the ctrl-t equivalent of bash's `declare -F __atuin_history` guard on the
@@ -250,7 +264,7 @@ fn bash_can_round_trip_bind_dash_x() -> Option<bool> {
 /// and intercepted with nothing to invoke, swallowing the key instead of leaving it alone.
 #[test]
 fn test_bash_ctrl_t_detection_declines_when_picker_function_is_absent() {
-    if bash_can_round_trip_bind_dash_x() == Some(false) {
+    if bash_can_extract_ctrl_t_binding() == Some(false) {
         return;
     }
     let detection = bash_ctrl_t_detection_snippet();
@@ -272,7 +286,7 @@ printf 'widget=[%s] plugins=[%s]\n' "$_WARP_EXTERNAL_CTRL_T_WIDGET" "${{shell_pl
 
 #[test]
 fn test_bash_ctrl_t_detection_tags_when_picker_function_is_present() {
-    if bash_can_round_trip_bind_dash_x() == Some(false) {
+    if bash_can_extract_ctrl_t_binding() == Some(false) {
         return;
     }
     let detection = bash_ctrl_t_detection_snippet();
