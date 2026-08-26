@@ -85,6 +85,19 @@ fn model_from_markdown(
     app: &mut App,
     should_initialize_cloud_model: bool,
 ) -> ModelHandle<NotebooksEditorModel> {
+    let window = setup_editor_window(app, should_initialize_cloud_model);
+    app.add_model(|ctx| {
+        let styles = rich_text_styles(Appearance::as_ref(ctx), FontSettings::as_ref(ctx));
+        let mut model = NotebooksEditorModel::new(styles, window, ctx);
+        model.reset_with_markdown(markdown, ctx);
+
+        model
+    })
+}
+
+/// Register the singletons and host window that a [`NotebooksEditorModel`] depends on, returning
+/// the window a model should bind to.
+fn setup_editor_window(app: &mut App, should_initialize_cloud_model: bool) -> warpui::WindowId {
     let global_resources = GlobalResourceHandles::mock(app);
     app.add_singleton_model(|_| GlobalResourceHandlesProvider::new(global_resources));
     app.add_singleton_model(|_| ActiveSession::default());
@@ -119,13 +132,7 @@ fn model_from_markdown(
         });
         TestView { editor }
     });
-    app.add_model(|ctx| {
-        let styles = rich_text_styles(Appearance::as_ref(ctx), FontSettings::as_ref(ctx));
-        let mut model = NotebooksEditorModel::new(styles, window, ctx);
-        model.reset_with_markdown(markdown, ctx);
-
-        model
-    })
+    window
 }
 
 fn initialize_deps(app: &mut App) {
@@ -1508,6 +1515,91 @@ fn test_debounced_resizes() {
         drop(render_state);
         app.update(|_| {});
         assert!(events_rx.is_empty() && events_rx.is_closed());
+    });
+}
+
+/// Creates an unbound editor containing one code block, binds it to a window, and drives the
+/// viewport report that a first real layout produces. Returns the number of [`NotebookCommand`]
+/// child models afterward.
+///
+/// `handle_render_model_event` drops render events while `rte_window_id` is `None`, so the
+/// `LayoutUpdated` emitted when content is first set never reaches `child_models` — that holds
+/// whether or not layout is deferred. Recovery comes from the first layout reporting a viewport
+/// width change, which drives a debounced `rebuild_layout` whose buffer edit emits a second
+/// `LayoutUpdated`.
+async fn child_models_after_binding_unbound_editor(app: &mut App, defer_layout: bool) -> usize {
+    initialize_deps(app);
+    let window = setup_editor_window(app, true);
+
+    let model = app.add_model(|ctx| {
+        let styles = rich_text_styles(Appearance::as_ref(ctx), FontSettings::as_ref(ctx));
+        let mut model = if defer_layout {
+            NotebooksEditorModel::new_unbound_lazy(styles, ctx)
+        } else {
+            NotebooksEditorModel::new_unbound(styles, ctx)
+        };
+        model.reset_with_markdown("```\nA command\n```", ctx);
+        model
+    });
+    layout_model(app, &model).await;
+
+    // Nothing yet: the model was unbound when its content was set.
+    assert!(command_models(&model, app).is_empty());
+
+    model.update(app, |model, ctx| model.set_window_id(window, ctx));
+
+    let render_state = app.read(|ctx| model.as_ref(ctx).render_state().clone());
+    let (events_tx, events_rx) = async_channel::unbounded();
+    let observed = render_state.clone();
+    let _observer = app.add_model::<Observer, _>(move |ctx| {
+        ctx.subscribe_to_model(&observed, move |_, _, event, _| {
+            block_on(events_tx.send(*event)).unwrap();
+        });
+        Observer {}
+    });
+
+    // Mirror what `RichTextElement` reports through `apply_element_update` on its first layout.
+    // The viewport starts at zero width, so `ViewportState::viewport_size` always flags
+    // `needs_layout` for an editor that has never been rendered.
+    render_state.update(app, |render_state, ctx| {
+        render_state.set_viewport_size(
+            SizeInfo {
+                viewport_size: Vector2F::new(800., 600.),
+                needs_layout: true,
+            },
+            ctx,
+        )
+    });
+
+    // Awaiting the events (rather than sleeping) keeps this deterministic: the debounced rebuild
+    // only runs once the executor has been pumped past the debounce period.
+    assert_eq!(events_rx.recv().await, Ok(RenderEvent::NeedsResize));
+    assert_eq!(events_rx.recv().await, Ok(RenderEvent::LayoutUpdated));
+    app.update(|_| {});
+
+    command_models(&model, app).len()
+}
+
+#[test]
+fn test_eager_layout_populates_child_models_after_binding() {
+    App::test((), |mut app| async move {
+        assert_eq!(
+            child_models_after_binding_unbound_editor(&mut app, false).await,
+            1
+        );
+    });
+}
+
+/// Deferred layout — what conversation restore uses for plan documents — must populate child
+/// models exactly like the eager path, or restored plans would lose their code block, embedded
+/// item, and Mermaid controls.
+#[test]
+fn test_deferred_layout_populates_child_models_after_binding() {
+    App::test((), |mut app| async move {
+        assert_eq!(
+            child_models_after_binding_unbound_editor(&mut app, true).await,
+            1
+        );
     });
 }
 
