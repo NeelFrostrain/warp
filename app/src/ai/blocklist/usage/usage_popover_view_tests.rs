@@ -55,8 +55,8 @@ fn model_usage_rows_has_no_badge_for_unknown_categories() {
     assert_eq!(rows[0].role_badge, None);
 }
 
-fn charged_usage_with_input_cost(cost_in_cents: f32) -> ChargedUsageTotals {
-    ChargedUsageTotals {
+fn charged_usage_with_input_cost(cost_in_cents: f32) -> PersistedModelTokenCost {
+    PersistedModelTokenCost {
         input_cost_in_cents: cost_in_cents,
         ..Default::default()
     }

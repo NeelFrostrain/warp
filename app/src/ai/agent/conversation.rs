@@ -2635,19 +2635,6 @@ impl AIConversation {
                 .charged_usage_for_last_block
                 .get_or_insert_with(ChargedUsageTotals::default);
             *charged_usage_for_last_block += totals;
-
-            let llm_preferences = LLMPreferences::as_ref(ctx);
-            let totals_by_model =
-                ChargedUsageTotals::per_model_from(&request_charges, |config_key| {
-                    llm_preferences.custom_endpoint_usage_display_label(config_key)
-                });
-            for (model_id, model_totals) in totals_by_model {
-                *self
-                    .conversation_usage_metadata
-                    .total_charged_usage_by_model
-                    .entry(model_id)
-                    .or_default() += model_totals;
-            }
         }
 
         if let Some(usage_metadata) = usage_metadata {
@@ -4206,18 +4193,6 @@ impl AIConversation {
     #[allow(dead_code)]
     pub fn total_token_usage(&self) -> Vec<TokenUsage> {
         self.total_token_usage_by_model.values().cloned().collect()
-    }
-
-    /// Cumulative per-model charged-usage breakdown (input/output/
-    /// cache-read/cache-write cost + tokens, plus web-search count/cost),
-    /// keyed the same way as [`Self::total_token_usage`]. Persisted as part
-    /// of `conversation_usage_metadata`, so it survives restore. Empty until
-    /// a response with per-model charges has been received (flag off, or no
-    /// completed request yet).
-    pub fn charged_usage_by_model(&self) -> &HashMap<String, ChargedUsageTotals> {
-        &self
-            .conversation_usage_metadata
-            .total_charged_usage_by_model
     }
 
     /// Compact usage totals for lightweight displays (e.g. the TUI footer's

@@ -54,7 +54,7 @@ use crate::ai::blocklist::usage::rollup::{
 use crate::appearance::Appearance;
 use crate::features::FeatureFlag;
 use crate::persistence::model::{
-    ChargedUsageTotals, FULL_TERMINAL_USE_CATEGORY, ModelTokenUsage, PRIMARY_AGENT_CATEGORY,
+    FULL_TERMINAL_USE_CATEGORY, ModelTokenUsage, PRIMARY_AGENT_CATEGORY, PersistedModelTokenCost,
 };
 use crate::settings_view::SettingsSection;
 use crate::ui_components::blended_colors;
@@ -993,7 +993,7 @@ struct ModelUsageRow {
     role_badge: Option<&'static str>,
     tokens: u64,
     cost_in_cents: Option<f32>,
-    charged_usage: Option<ChargedUsageTotals>,
+    charged_usage: Option<PersistedModelTokenCost>,
 }
 
 /// Builds the sorted per-model row list from raw per-conversation token
@@ -1001,7 +1001,7 @@ struct ModelUsageRow {
 /// credits-based breakdown's sort), then alphabetically by model id.
 fn model_usage_rows(
     models: &[ModelTokenUsage],
-    charged_usage_by_model: &HashMap<String, ChargedUsageTotals>,
+    charged_usage_by_model: &HashMap<String, PersistedModelTokenCost>,
 ) -> Vec<ModelUsageRow> {
     let mut rows: Vec<ModelUsageRow> = models
         .iter()
@@ -1018,7 +1018,7 @@ fn model_usage_rows(
                 model_id: model.model_id.clone(),
                 role_badge,
                 tokens,
-                cost_in_cents: charged_usage.map(|usage| usage.total_cost_in_cents()),
+                cost_in_cents: charged_usage.map(|usage| usage.cost_in_cents()),
                 charged_usage,
             })
         })
@@ -1175,45 +1175,45 @@ pub(crate) fn format_cost_only(cost_in_cents: Option<f32>) -> String {
 /// categories the model didn't incur (e.g. cache tokens only apply to
 /// Anthropic models, and web searches are relatively rare).
 fn render_charged_usage_breakdown(
-    charged_usage: &ChargedUsageTotals,
+    charged_usage: &PersistedModelTokenCost,
     appearance: &Appearance,
 ) -> Box<dyn Element> {
     let mut column = Flex::column().with_spacing(4.);
-    if charged_usage.input_tokens > 0 {
+    if charged_usage.total_input > 0 {
         column.add_child(render_label_value_row(
             "Input tokens",
             format_tokens_and_cost(
-                Some(charged_usage.input_tokens as u64),
+                Some(charged_usage.total_input),
                 Some(charged_usage.input_cost_in_cents),
             ),
             appearance,
         ));
     }
-    if charged_usage.output_tokens > 0 {
+    if charged_usage.output > 0 {
         column.add_child(render_label_value_row(
             "Output tokens",
             format_tokens_and_cost(
-                Some(charged_usage.output_tokens as u64),
+                Some(charged_usage.output),
                 Some(charged_usage.output_cost_in_cents),
             ),
             appearance,
         ));
     }
-    if charged_usage.input_cache_read_tokens > 0 {
+    if charged_usage.input_cache_read > 0 {
         column.add_child(render_label_value_row(
             "Cache read tokens",
             format_tokens_and_cost(
-                Some(charged_usage.input_cache_read_tokens as u64),
+                Some(charged_usage.input_cache_read),
                 Some(charged_usage.input_cache_read_cost_in_cents),
             ),
             appearance,
         ));
     }
-    if charged_usage.input_cache_write_tokens > 0 {
+    if charged_usage.input_cache_write > 0 {
         column.add_child(render_label_value_row(
             "Cache write tokens",
             format_tokens_and_cost(
-                Some(charged_usage.input_cache_write_tokens as u64),
+                Some(charged_usage.input_cache_write),
                 Some(charged_usage.input_cache_write_cost_in_cents),
             ),
             appearance,
@@ -1223,7 +1223,7 @@ fn render_charged_usage_breakdown(
         column.add_child(render_label_value_row(
             "Web searches",
             format_count_and_cost(
-                charged_usage.web_search_count,
+                charged_usage.web_search_count as u32,
                 "searches",
                 charged_usage.web_search_cost_in_cents,
             ),
