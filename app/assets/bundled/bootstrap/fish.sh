@@ -577,7 +577,10 @@ function warp_run_external_ctrl_r_widget
     case 'fzf-history-widget'
       test -z "$fish_private_mode"; and builtin history merge
       fzf-history-widget
-      set result (commandline)
+      # Piped through `string collect`: a multi-line selection would otherwise make this `set`'s
+      # own command substitution split it into a list, which `warp_escape_json` below would then
+      # silently space-join instead of newline-join once quoted back down to a single argument.
+      set result (commandline | string collect)
       commandline -r ''
     case '_atuin_search'
       # atuin writes its TUI to stdout and the selection to fd 3, so the two are swapped here to
@@ -653,7 +656,10 @@ function warp_run_external_ctrl_t_widget
       commandline -r -- $original_line
       commandline -C -- $char_cursor
       fzf-file-widget
-      set result (warp_ctrl_t_widget_result "$original_line" (commandline))
+      # (commandline | string collect), not plain (commandline): unquoted, a multi-line result
+      # would otherwise expand to multiple arguments here, silently truncating
+      # warp_ctrl_t_widget_result's $argv[2] comparison and return value to its first line alone.
+      set result (warp_ctrl_t_widget_result "$original_line" (commandline | string collect))
       commandline -r ''
       rm -f "$draft_file"
   end

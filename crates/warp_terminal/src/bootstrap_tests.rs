@@ -334,6 +334,57 @@ fn test_fish_ctrl_r_widget_reports_empty_buffer_when_widget_leaves_commandline_u
     assert!(stdout.contains(r#""buffer": """#), "{stdout}");
 }
 
+fn fish_warp_escape_json_fn() -> &'static str {
+    const FISH_SH: &str = include_str!("../../../app/assets/bundled/bootstrap/fish.sh");
+    let start_marker = "function warp_escape_json\n";
+    let start = FISH_SH
+        .find(start_marker)
+        .expect("fish warp_escape_json function start should exist");
+    let end_marker = "\nend\n";
+    let end = FISH_SH[start..]
+        .find(end_marker)
+        .expect("fish warp_escape_json function end should exist");
+    &FISH_SH[start..start + end + end_marker.len()]
+}
+
+/// Regression test for `set result (commandline | string collect)` above: without `string
+/// collect`, a multi-line selection makes that `set`'s own command substitution split it into a
+/// list by newline, and the real `warp_escape_json` (used here instead of the plain-join stub the
+/// other tests in this section use, since the defect is specifically in how it escapes -- or
+/// fails to escape -- what it's given) then quotes that list back down to a single argument by
+/// joining with a space instead of preserving the newline as JSON's `\n` escape.
+#[test]
+fn test_fish_ctrl_r_widget_reports_multiline_selection_with_embedded_newline() {
+    let runner = fish_ctrl_r_widget_runner_fn();
+    let escape_json = fish_warp_escape_json_fn();
+    let script = format!(
+        r#"
+{escape_json}
+function warp_send_json_message
+  echo "$argv"
+end
+set -g _test_commandline_value ''
+function commandline
+  echo "$_test_commandline_value"
+end
+function fzf-history-widget
+  set -g _test_commandline_value (printf 'echo one\necho two' | string collect)
+end
+set -g _WARP_EXTERNAL_CTRL_R_WIDGET fzf-history-widget
+set -g WARP_SESSION_ID 12345
+{runner}
+warp_run_external_ctrl_r_widget test-token
+"#
+    );
+    let Some(stdout) = run_fish(&script) else {
+        return;
+    };
+    assert!(
+        stdout.contains(r#""buffer": "echo one\necho two""#),
+        "{stdout}"
+    );
+}
+
 fn fish_ctrl_t_widget_query_fn() -> &'static str {
     const FISH_SH: &str = include_str!("../../../app/assets/bundled/bootstrap/fish.sh");
     let start_marker = "function warp_external_ctrl_t_widget\n  set -l widget \"\"\n  for binding in (bind \\ct 2>/dev/null)";
@@ -459,6 +510,132 @@ printf 'original_line=[%s]\n' "$original_line"
         stdout.contains("original_line=[echo one\necho two]"),
         "{stdout}"
     );
+}
+
+fn fish_ctrl_t_widget_runner_fn() -> &'static str {
+    const FISH_SH: &str = include_str!("../../../app/assets/bundled/bootstrap/fish.sh");
+    let start_marker = "function warp_run_external_ctrl_t_widget\n";
+    let start = FISH_SH
+        .find(start_marker)
+        .expect("fish ctrl-t widget runner function start should exist");
+    let end_marker = "\nend\n";
+    let end = FISH_SH[start..]
+        .find(end_marker)
+        .expect("fish ctrl-t widget runner function end should exist");
+    &FISH_SH[start..start + end + end_marker.len()]
+}
+
+fn fish_ctrl_t_draft_file_path_fn() -> &'static str {
+    const FISH_SH: &str = include_str!("../../../app/assets/bundled/bootstrap/fish.sh");
+    let start_marker = "function warp_ctrl_t_draft_file_path\n";
+    let start = FISH_SH
+        .find(start_marker)
+        .expect("fish ctrl-t draft file path function start should exist");
+    let end_marker = "\nend\n";
+    let end = FISH_SH[start..]
+        .find(end_marker)
+        .expect("fish ctrl-t draft file path function end should exist");
+    &FISH_SH[start..start + end + end_marker.len()]
+}
+
+/// Builds a script that runs the full `warp_run_external_ctrl_t_widget` (not just the
+/// `warp_ctrl_t_widget_result` comparison helper in isolation) against a real draft file, so the
+/// `(commandline | string collect)` argument at its `fzf-file-widget` call site is exercised too
+/// -- unquoted, a multi-line result there would otherwise expand to multiple arguments, silently
+/// truncating that comparison to the result's first line alone. `commandline` is stubbed
+/// statefully (supporting the `-r --` and `-C --` forms the widget actually calls, plus a plain
+/// read) rather than as a fixed value, since the widget both seeds and reads it back.
+fn fish_ctrl_t_widget_test_script(xdg_runtime_dir: &str, widget_body: &str) -> String {
+    let runner = fish_ctrl_t_widget_runner_fn();
+    let draft_file_path_fn = fish_ctrl_t_draft_file_path_fn();
+    let widget_result_fn = fish_ctrl_t_widget_result_fn();
+    format!(
+        r#"
+# Unlike the real warp_escape_json (see fish_warp_escape_json_fn above), this stub doesn't
+# actually escape a real newline into JSON's `\n` -- piped through `string collect` purely so
+# that leaving one in doesn't itself get re-split by the `set` below that captures this
+# function's own output, which would otherwise mask the very truncation these tests exist to
+# catch behind an unrelated space-joining artifact of the stub.
+function warp_escape_json
+  string join \n $argv | string collect
+end
+function warp_send_json_message
+  echo "$argv"
+end
+set -gx XDG_RUNTIME_DIR '{xdg_runtime_dir}'
+{draft_file_path_fn}
+{widget_result_fn}
+set -g _test_cl_value ''
+function commandline
+  if test (count $argv) -ge 1; and test "$argv[1]" = '-r'
+    set -g _test_cl_value (string join \n -- $argv[3..] | string collect)
+    return 0
+  end
+  if test (count $argv) -ge 1; and test "$argv[1]" = '-C'
+    return 0
+  end
+  echo "$_test_cl_value"
+end
+function fzf-file-widget
+  {widget_body}
+end
+set -g _WARP_EXTERNAL_CTRL_T_WIDGET fzf-file-widget
+set -g WARP_SESSION_ID 12345
+{runner}
+warp_run_external_ctrl_t_widget test-token
+"#
+    )
+}
+
+fn write_ctrl_t_test_draft(xdg_runtime_dir: &std::path::Path, contents: &str) {
+    std::fs::create_dir_all(xdg_runtime_dir).expect("should create test XDG_RUNTIME_DIR");
+    std::fs::write(xdg_runtime_dir.join("warp-ctrl-t-test-token"), contents)
+        .expect("should write test draft file");
+}
+
+/// Regression test for the `(commandline | string collect)` argument at the widget's
+/// `fzf-file-widget` call site: without `string collect`, a multi-line selection is split by that
+/// call's own (unquoted) command substitution into multiple arguments, silently truncating
+/// `warp_ctrl_t_widget_result`'s second argument -- and therefore the reported buffer -- to the
+/// selection's first line alone.
+#[test]
+fn test_fish_ctrl_t_widget_reports_full_multiline_change_without_truncation() {
+    let xdg_runtime_dir =
+        std::env::temp_dir().join(format!("warp-ctrl-t-widget-test-{}", uuid::Uuid::new_v4()));
+    write_ctrl_t_test_draft(&xdg_runtime_dir, "10\necho START\nMIDDLE");
+    let script = fish_ctrl_t_widget_test_script(
+        &xdg_runtime_dir.display().to_string(),
+        "commandline -r -- (printf 'echo START\\nMIDDLE nested.rs ' | string collect)",
+    );
+    let stdout = run_fish(&script);
+    std::fs::remove_dir_all(&xdg_runtime_dir).ok();
+    let Some(stdout) = stdout else {
+        return;
+    };
+    assert!(
+        stdout.contains("\"buffer\": \"echo START\nMIDDLE nested.rs \""),
+        "{stdout}"
+    );
+}
+
+/// Companion to the test above, for the failure mode the same truncation causes on cancel: a
+/// multi-line draft left unchanged gets word-split at the same call site, so
+/// `warp_ctrl_t_widget_result` compares the full original line against only its own first line,
+/// finds them unequal, and reports that stale first line as if it were a real selection instead
+/// of the empty buffer this "unchanged" case is supposed to produce.
+#[test]
+fn test_fish_ctrl_t_widget_reports_empty_when_multiline_draft_is_left_unchanged() {
+    let xdg_runtime_dir =
+        std::env::temp_dir().join(format!("warp-ctrl-t-widget-test-{}", uuid::Uuid::new_v4()));
+    write_ctrl_t_test_draft(&xdg_runtime_dir, "10\necho START\nMIDDLE");
+    let script =
+        fish_ctrl_t_widget_test_script(&xdg_runtime_dir.display().to_string(), "# cancelled");
+    let stdout = run_fish(&script);
+    std::fs::remove_dir_all(&xdg_runtime_dir).ok();
+    let Some(stdout) = stdout else {
+        return;
+    };
+    assert!(stdout.contains(r#""buffer": """#), "{stdout}");
 }
 
 /// Regression test for the fish equivalent of bash's picker-function guard: detection must
