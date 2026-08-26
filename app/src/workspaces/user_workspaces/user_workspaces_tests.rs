@@ -3,6 +3,7 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use mockall::Sequence;
+use regex::Regex;
 use settings::{PrivatePreferences, PublicPreferences};
 use warp_graphql::billing::{
     BillingMetadata as GqlBillingMetadata, BonusGrantsInfo as GqlBonusGrantsInfo,
@@ -78,8 +79,9 @@ use crate::workspaces::update_manager::TeamUpdateManager;
 use crate::workspaces::user_workspaces::UserWorkspaces;
 use crate::workspaces::workspace::{
     AdminEnablementSetting, ByoFirstPartyKey, EnforceableSetting, HostEnablementSetting,
-    LlmHostSettings, ManagedByokByoePolicy, MultiAdminPolicy, PurchaseAddOnCreditsPolicy,
-    SandboxedAgentSettings, SplitListSetting, TeamByoSettings, Workspace,
+    LinkSharingSettings, LlmHostSettings, ManagedByokByoePolicy, MultiAdminPolicy,
+    PurchaseAddOnCreditsPolicy, SandboxedAgentSettings, SplitListSetting, TeamByoSettings,
+    TeamLinkSharingSettings, Workspace,
 };
 
 #[derive(Default)]
@@ -883,6 +885,7 @@ fn admin_billing_link_for_default_team_targets_the_first_admin_team() {
         uid: user_uid,
         email: email.to_owned(),
         role: MembershipRole::Owner,
+        is_disabled: false,
     });
     let mut second_team = first_team.clone();
     second_team.uid = 456.into();
@@ -915,6 +918,7 @@ fn admin_billing_link_for_default_team_accepts_admin_when_multi_admin_is_enabled
         uid: user_uid,
         email: email.to_owned(),
         role: MembershipRole::Admin,
+        is_disabled: false,
     });
     let team_uid = team.uid;
     let workspace = workspace_for_test(&team);
@@ -943,6 +947,7 @@ fn admin_billing_link_for_default_team_rejects_admin_without_multi_admin_policy(
         uid: user_uid,
         email: email.to_owned(),
         role: MembershipRole::Admin,
+        is_disabled: false,
     });
     let workspace = workspace_for_test(&team);
 
@@ -967,6 +972,7 @@ fn admin_billing_link_for_default_team_rejects_regular_members() {
         uid: user_uid,
         email: email.to_owned(),
         role: MembershipRole::User,
+        is_disabled: false,
     });
     let workspace = workspace_for_test(&team);
 
@@ -1155,6 +1161,171 @@ fn test_window_team_reconciliation_moves_rendering_but_not_a_captured_context() 
             "a context captured for team A should keep pointing at team A rather than follow \
              the window onto team B"
         );
+    })
+}
+
+fn set_team_remote_session_policy(team: &mut Team, allow_ai: bool, patterns: &[&str]) {
+    team.settings
+        .ai_permissions
+        .allow_ai_in_remote_sessions
+        .value = allow_ai;
+    team.settings.ai_permissions.remote_session_regex_list = patterns
+        .iter()
+        .map(|pattern| Regex::new(pattern).expect("test pattern should compile"))
+        .collect();
+}
+
+fn set_workspace_remote_session_policy(
+    workspace: &mut Workspace,
+    allow_ai: bool,
+    patterns: &[&str],
+) {
+    workspace
+        .settings
+        .ai_permissions_settings
+        .allow_ai_in_remote_sessions = allow_ai;
+    workspace
+        .settings
+        .ai_permissions_settings
+        .remote_session_regex_list = patterns
+        .iter()
+        .map(|pattern| Regex::new(pattern).expect("test pattern should compile"))
+        .collect();
+}
+
+fn remote_session_patterns_for_surface(
+    view: &ViewHandle<TeamContextTestView>,
+    app: &AppContext,
+) -> HashSet<String> {
+    let user_workspaces = UserWorkspaces::as_ref(app);
+    let scope = user_workspaces.team_context(&view.downgrade(), app);
+    user_workspaces
+        .get_remote_session_regex_list(&scope)
+        .iter()
+        .map(|regex| regex.as_str().to_string())
+        .collect()
+}
+
+fn remote_session_ai_allowed_for_surface(
+    view: &ViewHandle<TeamContextTestView>,
+    app: &AppContext,
+) -> bool {
+    let user_workspaces = UserWorkspaces::as_ref(app);
+    let scope = user_workspaces.team_context(&view.downgrade(), app);
+    user_workspaces.is_ai_allowed_in_remote_sessions(&scope)
+}
+
+/// Each surface is judged by the rules of the team whose window it is in, so two terminals on
+/// opposing teams get opposing answers at the same moment.
+#[test]
+fn remote_session_policy_follows_each_surfaces_own_team() {
+    let (mut team_a, mut team_b) = two_teams();
+    set_team_remote_session_policy(&mut team_a, true, &["^kubectl"]);
+    set_team_remote_session_policy(&mut team_b, false, &["^ssh"]);
+    let mut workspace = workspace_for_test(&team_a);
+    workspace.teams = vec![team_a.clone(), team_b.clone()];
+
+    App::test((), |mut app| async move {
+        initialize_window_team_test_app(&mut app, vec![workspace]);
+
+        let (window_a, view_a) = create_test_window(&mut app);
+        let (window_b, view_b) = create_test_window(&mut app);
+        UserWorkspaces::handle(&app).update(&mut app, |user_workspaces, ctx| {
+            user_workspaces.set_team_for_window(window_a, team_a.uid, ctx);
+            user_workspaces.set_team_for_window(window_b, team_b.uid, ctx);
+        });
+
+        app.read(|ctx| {
+            assert!(
+                remote_session_ai_allowed_for_surface(&view_a, ctx),
+                "the surface in team A's window is governed by team A, which permits it"
+            );
+            assert!(
+                !remote_session_ai_allowed_for_surface(&view_b, ctx),
+                "the surface in team B's window is governed by team B, which forbids it"
+            );
+            assert_eq!(
+                remote_session_patterns_for_surface(&view_a, ctx),
+                HashSet::from(["^kubectl".to_string()])
+            );
+            assert_eq!(
+                remote_session_patterns_for_surface(&view_b, ctx),
+                HashSet::from(["^ssh".to_string()])
+            );
+        });
+    })
+}
+
+#[test]
+fn remote_session_policy_falls_back_to_the_workspace_for_a_user_with_no_teams() {
+    let team = team_for_test();
+    let mut workspace = workspace_for_test(&team);
+    workspace.teams.clear();
+    set_workspace_remote_session_policy(&mut workspace, false, &["^workspace-only"]);
+
+    App::test((), |mut app| async move {
+        initialize_window_team_test_app(&mut app, vec![workspace]);
+
+        let (window_id, view) = create_test_window(&mut app);
+        UserWorkspaces::handle(&app).update(&mut app, |user_workspaces, ctx| {
+            user_workspaces.register_window(window_id, None, ctx);
+        });
+
+        app.read(|ctx| {
+            assert!(
+                !remote_session_ai_allowed_for_surface(&view, ctx),
+                "the workspace value is genuinely team-neutral for a user with no teams, so it \
+                 is the one to read"
+            );
+            assert_eq!(
+                remote_session_patterns_for_surface(&view, ctx),
+                HashSet::from(["^workspace-only".to_string()])
+            );
+        });
+    })
+}
+
+/// Guards the shape of the getter rather than a reachable user scenario: a scope that names an
+/// unresolvable team must fail closed, not fall through to the no-team branch. Mirrors
+/// `member_byo_policy_denies_a_scope_naming_an_unresolvable_team`.
+#[test]
+fn remote_session_ai_permission_denies_a_scope_naming_an_unresolvable_team() {
+    let mut team = team_for_test();
+    set_team_remote_session_policy(&mut team, true, &["^kubectl"]);
+    let workspace = workspace_for_test(&team);
+
+    App::test((), |mut app| async move {
+        initialize_window_team_test_app(&mut app, vec![workspace]);
+
+        let unresolvable_team_scope = TeamContextForOperation::new_for_test(9999.into());
+        app.read(|ctx| {
+            let user_workspaces = UserWorkspaces::as_ref(ctx);
+            assert!(
+                !user_workspaces.is_ai_allowed_in_remote_sessions(&unresolvable_team_scope),
+                "a team whose policy cannot be read must not inherit another team's"
+            );
+        });
+    })
+}
+
+/// `current_workspace()` is `None` only when logged out or before the first metadata fetch, not
+/// for a teamless user (who has a personal workspace). With no workspace there is no admin
+/// policy to consult, so this permits -- preserving the pre-refactor default that the
+/// unresolvable-team deny would otherwise have swallowed.
+#[test]
+fn remote_session_ai_permission_is_allowed_for_a_user_with_no_workspace_at_all() {
+    App::test((), |mut app| async move {
+        initialize_window_team_test_app(&mut app, vec![]);
+
+        let (window_id, view) = create_test_window(&mut app);
+        UserWorkspaces::handle(&app).update(&mut app, |user_workspaces, ctx| {
+            user_workspaces.register_window(window_id, None, ctx);
+        });
+
+        app.read(|ctx| {
+            assert!(remote_session_ai_allowed_for_surface(&view, ctx));
+            assert!(remote_session_patterns_for_surface(&view, ctx).is_empty());
+        });
     })
 }
 
@@ -2200,6 +2371,118 @@ fn test_sandboxed_agent_denylist_falls_back_to_the_workspace_for_a_user_with_no_
     })
 }
 
+fn two_teams_with_opposing_link_sharing_policy() -> (Team, Team) {
+    fn link_sharing_settings(permitted: bool) -> TeamLinkSharingSettings {
+        let setting = EnforceableSetting {
+            value: permitted,
+            is_enforced_by_workspace: false,
+        };
+        TeamLinkSharingSettings {
+            anyone_with_link_sharing_enabled: setting.clone(),
+            direct_link_sharing_enabled: setting,
+        }
+    }
+
+    let (mut team_a, mut team_b) = two_teams();
+    team_a.settings.link_sharing = link_sharing_settings(true);
+    team_b.settings.link_sharing = link_sharing_settings(false);
+    (team_a, team_b)
+}
+
+#[test]
+fn link_sharing_follows_each_scopes_team() {
+    let (team_a, team_b) = two_teams_with_opposing_link_sharing_policy();
+    let mut workspace = workspace_for_test(&team_a);
+    workspace.teams.push(team_b.clone());
+
+    App::test((), |mut app| async move {
+        initialize_window_team_test_app(&mut app, vec![workspace]);
+
+        app.read(|ctx| {
+            let user_workspaces = UserWorkspaces::as_ref(ctx);
+            let scope_a = TeamContextForOperation::new_for_test(team_a.uid);
+            let scope_b = TeamContextForOperation::new_for_test(team_b.uid);
+
+            assert!(user_workspaces.is_anyone_with_link_sharing_enabled(&scope_a));
+            assert!(user_workspaces.is_direct_link_sharing_enabled(&scope_a));
+            assert!(!user_workspaces.is_anyone_with_link_sharing_enabled(&scope_b));
+            assert!(!user_workspaces.is_direct_link_sharing_enabled(&scope_b));
+        });
+    })
+}
+
+fn assert_teamless_scope_reads_workspace_link_sharing_policy(permitted: bool) {
+    let (_team_a, team_b) = two_teams_with_opposing_link_sharing_policy();
+    let mut workspace = workspace_for_test(&team_b);
+    workspace.teams.clear();
+    workspace.settings.link_sharing_settings = LinkSharingSettings {
+        anyone_with_link_sharing_enabled: permitted,
+        direct_link_sharing_enabled: permitted,
+    };
+
+    App::test((), |mut app| async move {
+        initialize_window_team_test_app(&mut app, vec![workspace]);
+
+        app.read(|ctx| {
+            let user_workspaces = UserWorkspaces::as_ref(ctx);
+            let scope = TeamlessScopeForTest;
+            assert_eq!(
+                user_workspaces.is_anyone_with_link_sharing_enabled(&scope),
+                permitted
+            );
+            assert_eq!(
+                user_workspaces.is_direct_link_sharing_enabled(&scope),
+                permitted
+            );
+        });
+    })
+}
+
+#[test]
+fn link_sharing_for_a_teamless_scope_follows_a_permissive_workspace() {
+    assert_teamless_scope_reads_workspace_link_sharing_policy(true);
+}
+
+#[test]
+fn link_sharing_for_a_teamless_scope_follows_a_restrictive_workspace() {
+    assert_teamless_scope_reads_workspace_link_sharing_policy(false);
+}
+
+#[test]
+fn link_sharing_fails_open_for_an_unresolvable_team() {
+    let (_team_a, team_b) = two_teams_with_opposing_link_sharing_policy();
+    let mut workspace = workspace_for_test(&team_b);
+    workspace.settings.link_sharing_settings = LinkSharingSettings {
+        anyone_with_link_sharing_enabled: false,
+        direct_link_sharing_enabled: false,
+    };
+
+    App::test((), |mut app| async move {
+        initialize_window_team_test_app(&mut app, vec![workspace]);
+
+        let scope = TeamContextForOperation::new_for_test(9999.into());
+        app.read(|ctx| {
+            let user_workspaces = UserWorkspaces::as_ref(ctx);
+            assert!(user_workspaces.is_anyone_with_link_sharing_enabled(&scope));
+            assert!(user_workspaces.is_direct_link_sharing_enabled(&scope));
+        });
+    })
+}
+
+#[test]
+fn link_sharing_fails_open_without_a_workspace() {
+    App::test((), |mut app| async move {
+        initialize_window_team_test_app(&mut app, vec![]);
+
+        app.read(|ctx| {
+            let user_workspaces = UserWorkspaces::as_ref(ctx);
+            let scope = TeamlessScopeForTest;
+            assert!(user_workspaces.is_anyone_with_link_sharing_enabled(&scope));
+            assert!(user_workspaces.is_direct_link_sharing_enabled(&scope));
+        });
+    })
+}
+
 #[test]
 fn test_spaces_for_window_orders_selected_team_shared_and_personal() {
     let _flag = FeatureFlag::SharedWithMe.override_enabled(true);
@@ -3107,6 +3390,7 @@ fn test_remove_user_from_team_success_emits_success_event_and_refreshes_members(
         uid: user_uid,
         email: "member@example.com".to_string(),
         role: MembershipRole::User,
+        is_disabled: false,
     });
     let team_uid = team.uid;
     let workspace = workspace_for_test(&team);
@@ -3420,6 +3704,7 @@ fn gql_team(uid: &str, name: &str, member_uids: &[&str]) -> GqlTeam {
                 uid: (*member_uid).into(),
                 email: format!("{member_uid}@example.com"),
                 role: GqlMembershipRole::User,
+                is_disabled: false,
             })
             .collect(),
         settings: gql_team_settings(),

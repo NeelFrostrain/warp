@@ -2,7 +2,6 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use anyhow::Result;
-use regex::Regex;
 use warp_core::features::FeatureFlag;
 use warp_core::settings::{ChangeEventReason, Setting};
 use warp_errors::report_error;
@@ -49,6 +48,8 @@ use crate::workspaces::workspace::{
 pub(crate) mod billing_workspace_settings;
 pub(crate) mod team_workspace_settings;
 pub(crate) use team_workspace_settings::TeamContextForOperation;
+#[cfg(test)]
+pub(crate) use team_workspace_settings::TeamlessScopeForTest;
 pub use team_workspace_settings::{TeamContext, TeamContextResolver, TeamScope};
 
 const STRIPE_SUBSCRIPTION_INTERVAL_PAGE_PREFIX: &str = "/upgrade";
@@ -308,6 +309,10 @@ impl UserWorkspaces {
     pub fn team_from_uid(&self, team_uid: ServerId) -> Option<&Team> {
         self.current_workspace()
             .and_then(|w| w.teams.iter().find(|t| t.uid == team_uid))
+    }
+
+    pub fn is_member_of_team(&self, team_uid: ServerId) -> bool {
+        self.team_from_uid(team_uid).is_some()
     }
 
     pub fn register_window(
@@ -1570,51 +1575,6 @@ impl UserWorkspaces {
             .unwrap_or_default()
     }
 
-    pub fn is_ai_allowed_in_remote_sessions(&self) -> bool {
-        self.current_workspace()
-            .map(|workspace| {
-                workspace
-                    .settings
-                    .ai_permissions_settings
-                    .allow_ai_in_remote_sessions
-            })
-            .unwrap_or(true)
-    }
-
-    pub fn get_remote_session_regex_list(&self) -> Vec<Regex> {
-        self.current_workspace()
-            .map(|workspace| {
-                workspace
-                    .settings
-                    .ai_permissions_settings
-                    .remote_session_regex_list
-                    .clone()
-            })
-            .unwrap_or_default()
-    }
-
-    pub fn is_anyone_with_link_sharing_enabled(&self) -> bool {
-        self.current_workspace()
-            .map(|workspace| {
-                workspace
-                    .settings
-                    .link_sharing_settings
-                    .anyone_with_link_sharing_enabled
-            })
-            .unwrap_or(true)
-    }
-
-    pub fn is_direct_link_sharing_enabled(&self) -> bool {
-        self.current_workspace()
-            .map(|workspace| {
-                workspace
-                    .settings
-                    .link_sharing_settings
-                    .direct_link_sharing_enabled
-            })
-            .unwrap_or(true)
-    }
-
     /// Whether invite links are enabled for the current workspace. This is a
     /// workspace-level setting; the teams-settings page reads it from here rather
     /// than from the `Team` struct.
@@ -1753,6 +1713,7 @@ impl UserWorkspaces {
                 uid: owner_uid,
                 email: "test@example.com".to_string(),
                 role: MembershipRole::Owner,
+                is_disabled: false,
                 usage_info: WorkspaceMemberUsageInfo {
                     requests_used_since_last_refresh: 0,
                     request_limit: 1000,
