@@ -122,6 +122,13 @@ fn format_token_count_abbreviates_above_1000() {
 }
 
 #[test]
+fn format_token_count_abbreviates_above_1_000_000_as_m() {
+    assert_eq!(format_token_count(999_999), "1000.0k");
+    assert_eq!(format_token_count(1_000_000), "1.0M");
+    assert_eq!(format_token_count(1_614_700), "1.6M");
+}
+
+#[test]
 fn format_tokens_and_cost_omits_dollar_suffix_when_flag_disabled() {
     let _flag = FeatureFlag::PricingTransparency.override_enabled(false);
 

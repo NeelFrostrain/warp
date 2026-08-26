@@ -34,8 +34,9 @@ use warp_core::ui::Icon;
 use warp_core::ui::theme::WarpTheme;
 use warpui::elements::{
     Border, ChildAnchor, ConstrainedBox, Container, CornerRadius, CrossAxisAlignment, Dismiss,
-    DispatchEventResult, Empty, EventHandler, Expanded, Flex, Hoverable, MainAxisAlignment,
-    MainAxisSize, MouseStateHandle, ParentAnchor, ParentElement, Radius, Text,
+    DispatchEventResult, DropShadow, Empty, EventHandler, Expanded, Flex, Hoverable,
+    MainAxisAlignment, MainAxisSize, MouseStateHandle, OffsetPositioning, ParentAnchor,
+    ParentElement, ParentOffsetBounds, Radius, Shrinkable, Stack, Text,
 };
 use warpui::platform::Cursor;
 use warpui::text_layout::ClipConfig;
@@ -493,13 +494,15 @@ impl UsagePopoverView {
         };
 
         // Model name and role badge are separate `Text`s (rather than one
-        // formatted string) so they can use different colors. Only the name
-        // is wrapped in `Expanded` + ellipsis-clipping, so a long model name
-        // truncates while the role badge (e.g. "(Primary agent)") stays
-        // fully visible.
+        // formatted string) so they can use different colors. The name uses
+        // `Shrinkable` (not `Expanded`) so it only claims as much width as it
+        // actually needs (ellipsis-clipping once it runs out of room)
+        // instead of being force-stretched to fill the row — `Expanded`
+        // would leave the role badge stranded at the far right of the row
+        // instead of immediately following a short model name.
         let mut label_row = Flex::row().with_cross_axis_alignment(CrossAxisAlignment::Center);
         label_row.add_child(
-            Expanded::new(
+            Shrinkable::new(
                 1.,
                 Text::new(row.model_id.clone(), appearance.ui_font_family(), font_size)
                     .with_color(blended_colors::text_main(theme, background))
@@ -525,14 +528,49 @@ impl UsagePopoverView {
             .entry(row.model_id.clone())
             .or_default()
             .clone();
-        let label_with_tooltip = appearance.ui_builder().overlay_tool_tip_on_element(
-            full_label,
-            hover_state,
-            label_row.finish(),
-            ParentAnchor::BottomLeft,
-            ChildAnchor::TopLeft,
-            vec2f(0., 4.),
-        );
+        // Built manually (rather than via the shared `Tooltip` UI component,
+        // whose blended background reads as translucent against the row
+        // beneath it) with an explicit solid background, border, and drop
+        // shadow, so it's unambiguously opaque and legible.
+        let tooltip_bg = theme.background().into_solid();
+        let tooltip_text_color = blended_colors::text_main(theme, tooltip_bg);
+        let tooltip_border_color = theme.outline().into_solid();
+        let tooltip_font_family = appearance.ui_font_family();
+        let label_row_element = label_row.finish();
+        let label_with_tooltip = Hoverable::new(hover_state, move |state| {
+            let mut stack = Stack::new().with_child(label_row_element);
+            if state.is_hovered() {
+                let tooltip = Container::new(
+                    Text::new(full_label, tooltip_font_family, font_size)
+                        .with_color(tooltip_text_color)
+                        .with_selectable(false)
+                        .finish(),
+                )
+                .with_background_color(tooltip_bg)
+                .with_border(Border::all(1.).with_border_color(tooltip_border_color))
+                .with_corner_radius(CornerRadius::with_all(Radius::Pixels(4.)))
+                .with_padding_left(8.)
+                .with_padding_right(8.)
+                .with_padding_top(4.)
+                .with_padding_bottom(4.)
+                .with_drop_shadow(
+                    DropShadow::new_with_standard_offset_and_spread(ColorU::new(0, 0, 0, 48))
+                        .with_offset(vec2f(0., 4.)),
+                )
+                .finish();
+                stack.add_positioned_overlay_child(
+                    tooltip,
+                    OffsetPositioning::offset_from_parent(
+                        vec2f(0., 4.),
+                        ParentOffsetBounds::WindowByPosition,
+                        ParentAnchor::BottomLeft,
+                        ChildAnchor::TopLeft,
+                    ),
+                );
+            }
+            stack.finish()
+        })
+        .finish();
 
         // The label is wrapped in `Expanded`: a plain (non-flex) `Text` in a
         // `Flex::row` sizes to its own intrinsic width regardless of the
@@ -581,7 +619,16 @@ impl UsagePopoverView {
                 .with_color(blended_colors::text_disabled(theme, background))
                 .finish(),
             };
-            column.add_child(Container::new(breakdown).with_padding_left(15.).finish());
+            // Extra right padding pulls the breakdown's trailing token/cost
+            // values in from the popover's edge, so they visibly underhang
+            // (rather than overhang) the model total row's own value, which
+            // stops short of the edge to make room for its chevron.
+            column.add_child(
+                Container::new(breakdown)
+                    .with_padding_left(15.)
+                    .with_padding_right(20.)
+                    .finish(),
+            );
         }
 
         let model_id = row.model_id.clone();
@@ -1061,10 +1108,13 @@ fn total_usage_tokens_and_cost(
     }
 }
 
-/// Formats a raw token count using a `k`-suffixed abbreviation above 1000
-/// tokens (e.g. `9.6k`), matching the Figma copy's token formatting.
+/// Formats a raw token count using `k`/`M`-suffixed abbreviations above
+/// 1,000 and 1,000,000 tokens respectively (e.g. `9.6k`, `1.6M`), matching
+/// the Figma copy's token formatting.
 fn format_token_count(tokens: u64) -> String {
-    if tokens >= 1000 {
+    if tokens >= 1_000_000 {
+        format!("{:.1}M", tokens as f64 / 1_000_000.)
+    } else if tokens >= 1000 {
         format!("{:.1}k", tokens as f64 / 1000.)
     } else {
         tokens.to_string()
@@ -1107,10 +1157,10 @@ fn format_count_and_cost(count: u32, unit: &str, cost_in_cents: f32) -> String {
 }
 
 /// Formats a bare dollar cost, e.g. `"$0.36"`, for values with no
-/// associated token/count figure (currently just the platform fee). Shows
-/// an em dash when the cost is unknown or `FeatureFlag::PricingTransparency`
-/// is disabled.
-fn format_cost_only(cost_in_cents: Option<f32>) -> String {
+/// associated token/count figure (currently the platform fee and the
+/// footer icon's hover tooltip). Shows an em dash when the cost is unknown
+/// or `FeatureFlag::PricingTransparency` is disabled.
+pub(crate) fn format_cost_only(cost_in_cents: Option<f32>) -> String {
     if !FeatureFlag::PricingTransparency.is_enabled() {
         return "\u{2014}".to_string();
     }

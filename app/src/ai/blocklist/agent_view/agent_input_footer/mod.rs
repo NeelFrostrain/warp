@@ -59,7 +59,7 @@ use crate::ai::blocklist::history_model::{BlocklistAIHistoryEvent, BlocklistAIHi
 use crate::ai::blocklist::prompt::prompt_alert::{PromptAlertEvent, PromptAlertView};
 use crate::ai::blocklist::usage::icon_for_context_window_usage;
 use crate::ai::blocklist::usage::usage_popover_view::{
-    UsagePopoverEvent, UsagePopoverView, format_tokens_and_cost,
+    UsagePopoverEvent, UsagePopoverView, format_cost_only,
 };
 use crate::ai::execution_profiles::profiles::AIExecutionProfilesModel;
 use crate::ai::harness_availability::HarnessAvailabilityModel;
@@ -2158,9 +2158,9 @@ impl AgentInputFooter {
         }
     }
 
-    /// Refreshes the usage button's tooltip with a compact "quick usage" summary
-    /// (tokens and cost) for the active conversation. The full breakdown is
-    /// only shown once the popover itself is opened.
+    /// Refreshes the usage button's tooltip with a compact dollar-cost
+    /// summary for the active conversation. The full breakdown is only
+    /// shown once the popover itself is opened.
     fn update_usage_button(&mut self, ctx: &mut ViewContext<Self>) {
         let Some(conversation) =
             BlocklistAIHistoryModel::as_ref(ctx).active_conversation(self.terminal_view_id)
@@ -2168,13 +2168,7 @@ impl AgentInputFooter {
             return;
         };
         let totals = conversation.usage_totals();
-        let tokens = totals
-            .charged_usage
-            .map(|usage| u64::from(usage.total_tokens()));
-        let tooltip = format!(
-            "Conversation: {}",
-            format_tokens_and_cost(tokens, totals.cost_in_cents)
-        );
+        let tooltip = format!("Conversation: {}", format_cost_only(totals.cost_in_cents));
         self.usage_button.update(ctx, |button, ctx| {
             button.set_tooltip(Some(tooltip), ctx);
         });
