@@ -1920,6 +1920,30 @@ fn write_ctrl_t_draft_file(
     cursor_offset: ByteOffset,
 ) -> anyhow::Result<()> {
     use std::io::Write as _;
+
+    write_ctrl_t_draft_file_with_writer(
+        token,
+        original_buffer,
+        cursor_offset,
+        |file, char_cursor, original_buffer| {
+            writeln!(file, "{char_cursor}")?;
+            file.write_all(original_buffer.as_bytes())
+        },
+    )
+}
+
+/// Implementation of [`write_ctrl_t_draft_file`], taking the write step as a parameter so tests
+/// can inject a failure partway through without needing a real filesystem-level write failure.
+///
+/// Cleans up the file it created if `write` fails: at that point the file already exists and may
+/// hold a partially-written in-progress command line, which leaving behind would defeat the
+/// owner-only permissions below just as thoroughly as never cleaning it up on success.
+fn write_ctrl_t_draft_file_with_writer(
+    token: &str,
+    original_buffer: &str,
+    cursor_offset: ByteOffset,
+    write: impl FnOnce(&mut std::fs::File, usize, &str) -> std::io::Result<()>,
+) -> anyhow::Result<()> {
     #[cfg(unix)]
     use std::os::unix::fs::OpenOptionsExt as _;
 
@@ -1934,8 +1958,10 @@ fn write_ctrl_t_draft_file(
     let mut file = options
         .open(&path)
         .with_context(|| format!("failed to create {}", path.display()))?;
-    writeln!(file, "{char_cursor}")?;
-    file.write_all(original_buffer.as_bytes())?;
+    if let Err(error) = write(&mut file, char_cursor, original_buffer) {
+        let _ = std::fs::remove_file(&path);
+        return Err(error).with_context(|| format!("failed to write {}", path.display()));
+    }
     Ok(())
 }
 

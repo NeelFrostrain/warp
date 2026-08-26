@@ -630,38 +630,16 @@ end
 # an unrelated write to the pty.
 #
 # Unlike warp_run_external_ctrl_r_widget above, this calls the user's own bound fzf-file-widget
-# directly rather than re-running fzf against an independent search command: that function is
-# token-aware (it parses the current commandline token into a search root, a seed query, and an
-# option prefix -- see fzf's own __fzf_parse_commandline -- then replaces just that token), and
-# reproducing that parsing by hand would either drop it or duplicate it badly. Calling a fish
-# function directly (rather than queuing it as a bound key with `commandline -f`, which would
-# defer its effect to the next prompt read instead of running it now) blocks until the picker
-# exits, unlike zle/bash's bind machinery, which is why this differs from the ctrl-r widget above.
-#
-# Since fzf-file-widget itself reads and writes the commandline, it needs the real draft line and
-# cursor to do anything useful with -- which can't be passed as this helper's own argument (argv
-# is visible to any local process via /proc) or embedded in the command Warp types (which would
-# land it in scrollback). So Warp writes it to the file warp_ctrl_t_draft_file_path locates,
-# owner-only (0600) so no other local user can read an in-progress command line, and this seeds
-# the widget with it via commandline -r/-C before calling it, then clears the line again
-# afterwards: since the widget already performed its own token-aware replacement, Warp takes the
-# reported result as the finished buffer wholesale rather than splicing a fragment into the
-# pre-handoff draft the way bash/zsh's plain-path report requires (see CtrlTApplyMode::Replace);
-# leaving the widget's own edit on the commandline would otherwise queue it for execution.
-# The draft file is removed on every exit from this branch, including a missing file and a
-# cancelled picker, since nothing else will ever clean it up.
+# directly rather than re-running fzf against an independent search command, since that function
+# is token-aware (see fzf's own __fzf_parse_commandline) and reproducing that parsing by hand
+# would either drop it or duplicate it badly.
 #
 # fzf-file-widget has no way to report cancellation distinctly from a selection: on Escape it
-# simply leaves the commandline exactly as seeded, so its output is indistinguishable from a
-# "selection" that happens to reproduce the original line by content alone. Collapse that case to
-# an empty result -- Warp's existing convention for "nothing selected", which bash/zsh's plain-path
-# widgets satisfy naturally since they never seed anything for cancellation to echo back -- so a
-# cancelled search restores the pre-handoff cursor instead of hitting CtrlTApplyMode::Replace's
-# no-op-on-cursor insertion path. A real selection cannot round-trip to this same false-cancel
-# case: fzf-file-widget always appends a trailing space when it completes a token, so replacing an
-# in-progress token always changes the line, and re-selecting a path already fully typed (cursor
-# past its trailing space, so there's no token left to replace) inserts a second copy rather than
-# reproducing the first -- confirmed live for both shapes.
+# leaves the commandline exactly as seeded, so its output is indistinguishable from a selection
+# that reproduces the original line. Collapse that case to an empty result, Warp's existing
+# convention for "nothing selected" -- a real selection can't trigger this false cancel, since
+# completing a token always appends a trailing space and reselecting an already-complete path
+# duplicates it rather than reproducing it (confirmed live).
 function warp_run_external_ctrl_t_widget
   set -l warp_ctrl_t_token "$argv[1]"
   set -l result ""
@@ -675,8 +653,11 @@ function warp_run_external_ctrl_t_widget
         set char_cursor $draft_contents[1]
         # The remaining lines are the draft verbatim: rejoining with the same separator the
         # command-substitution split on above losslessly reconstructs it, embedded newlines
-        # included, since the file has no trailing newline for fish to have dropped.
-        set original_line (string join \n -- $draft_contents[2..])
+        # included, since the file has no trailing newline for fish to have dropped. Piped
+        # through `string collect`, since otherwise the newline just reintroduced would make
+        # this `set`'s own command substitution re-split the joined string right back into a
+        # list.
+        set original_line (string join \n -- $draft_contents[2..] | string collect)
       end
       commandline -r -- $original_line
       commandline -C -- $char_cursor

@@ -333,6 +333,56 @@ printf 'result=[%s]\n' "$result"
     );
 }
 
+fn fish_ctrl_t_draft_decode_snippet() -> &'static str {
+    const FISH_SH: &str = include_str!("../../assets/bundled/bootstrap/fish.sh");
+    // Structural, not literal-text, boundaries (see `fish_ctrl_t_widget_result_fn` above) so a
+    // behavioral change to the reconstruction logic changes what the test observes.
+    let start_marker = "if test -f \"$draft_file\"\n";
+    let start = FISH_SH
+        .find(start_marker)
+        .expect("fish ctrl-t draft decode snippet start should exist");
+    let end_marker = "\n      end\n";
+    let end = FISH_SH[start..]
+        .find(end_marker)
+        .expect("fish ctrl-t draft decode snippet end should exist");
+    &FISH_SH[start..start + end + end_marker.len()]
+}
+
+/// Regression test for the fish decode path (`warp_run_external_ctrl_t_widget` reading back the
+/// draft file), not just the Rust file writer: a multiline in-progress command must survive
+/// reconstruction intact. fish's command substitution splits `cat`'s output into a list by
+/// newline, so rejoining it without `string collect` (see the comment on `warp_ctrl_t_widget`'s
+/// reconstruction line) silently drops the embedded newline back out -- exercising only the write
+/// side can never catch that, since the bug is entirely in how fish re-reads what was written.
+#[test]
+fn test_fish_ctrl_t_draft_decode_preserves_multiline_drafts() {
+    let decode_snippet = fish_ctrl_t_draft_decode_snippet();
+    let draft_file =
+        std::env::temp_dir().join(format!("warp-ctrl-t-decode-test-{}", uuid::Uuid::new_v4()));
+    std::fs::write(&draft_file, "8\necho one\necho two").expect("should write test draft file");
+    let draft_file_path = draft_file.display().to_string();
+    let script = format!(
+        r#"
+set -l draft_file '{draft_file_path}'
+set -l char_cursor 0
+set -l original_line ''
+{decode_snippet}
+printf 'char_cursor=[%s]\n' "$char_cursor"
+printf 'original_line=[%s]\n' "$original_line"
+"#
+    );
+    let stdout = run_fish(&script);
+    std::fs::remove_file(&draft_file).ok();
+    let Some(stdout) = stdout else {
+        return;
+    };
+    assert!(stdout.contains("char_cursor=[8]"), "{stdout}");
+    assert!(
+        stdout.contains("original_line=[echo one\necho two]"),
+        "{stdout}"
+    );
+}
+
 /// Regression test for the fish equivalent of bash's picker-function guard: detection must
 /// decline (no tag, no interception) when `fzf-file-widget` -- the function
 /// `warp_run_external_ctrl_t_widget` now calls directly -- isn't actually defined, even though

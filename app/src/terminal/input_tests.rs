@@ -2368,6 +2368,28 @@ fn write_ctrl_t_draft_file_is_created_with_owner_only_permissions() {
     );
 }
 
+/// The draft file may hold a partially-written in-progress command line if the write fails after
+/// creation; leaving it behind would defeat the owner-only permissions above just as thoroughly as
+/// never cleaning it up on success.
+#[test]
+fn write_ctrl_t_draft_file_removes_the_file_when_the_write_fails() {
+    let token = format!("test-{}", Uuid::new_v4());
+    let result = write_ctrl_t_draft_file_with_writer(
+        &token,
+        "echo hi",
+        ByteOffset::from(7),
+        |_file, _char_cursor, _original_buffer| {
+            Err(std::io::Error::other("simulated write failure"))
+        },
+    );
+
+    assert!(result.is_err(), "a write failure must be propagated");
+    assert!(
+        !ctrl_t_draft_file_path(&token).exists(),
+        "the draft file must not be left behind when the write fails"
+    );
+}
+
 /// While `ShellWidgetHandoff` is disabled (its default state, matching a user who hasn't opted
 /// into this prototype), the `workspace:trigger_external_ctrl_t_file_search` binding must be
 /// completely ineligible -- not merely a no-op when triggered -- so ctrl-t falls through to
