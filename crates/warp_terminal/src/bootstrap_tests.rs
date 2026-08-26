@@ -211,32 +211,37 @@ fn run_bash(script: &str) -> Option<String> {
     Some(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
-/// Bash's major version (`${BASH_VERSINFO[0]}`), or `None` if bash isn't installed at all --
-/// mirroring `run_bash`'s "shell missing" skip convention for callers that also need to skip on
-/// an installed-but-too-old bash (see `bash_ctrl_t_detection_snippet`'s callers below).
-fn bash_major_version() -> Option<u32> {
+/// Bash's `(major, minor)` version, or `None` if bash isn't installed at all -- mirroring
+/// `run_bash`'s "shell missing" skip convention for callers that also need to skip on an
+/// installed-but-too-old bash. The minor version matters here, not just the major: see
+/// `bash_supports_bind_dash_capital_x` below.
+fn bash_version() -> Option<(u32, u32)> {
     let output = command::blocking::Command::new("bash")
         .args([
             "--noprofile",
             "--norc",
             "-c",
-            "echo \"${BASH_VERSINFO[0]}\"",
+            "echo \"${BASH_VERSINFO[0]} ${BASH_VERSINFO[1]}\"",
         ])
         .output()
         .ok()?;
-    String::from_utf8_lossy(&output.stdout).trim().parse().ok()
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut fields = stdout.split_whitespace();
+    let major = fields.next()?.parse().ok()?;
+    let minor = fields.next()?.parse().ok()?;
+    Some((major, minor))
 }
 
-/// `bind -X` (list `-x` bindings), which this detection depends on entirely, doesn't exist in
-/// bash's readline before bash 4.0 -- it errors out silently here (stderr is redirected away),
-/// leaving detection permanently empty. That's a real, accepted limitation of the feature itself
-/// on bash < 4 (notably macOS's system bash 3.2; see the PR's "Known limitations"), not something
-/// a test workaround should paper over: on such a bash, both of the tests below would either fail
-/// (the "tags" case) or pass vacuously without exercising the absent-function branch at all (the
-/// "declines" case just happens to expect the same empty result `bind -X`'s absence always
-/// produces). Skip both rather than let the latter masquerade as real coverage.
+/// `bind -X` (list `-x` bindings), which this detection depends on entirely, was added in bash
+/// 4.3 (NEWS-4.3 item q) -- on anything older it errors out silently here (stderr is redirected
+/// away), leaving detection permanently empty. That's a real, accepted limitation of the feature
+/// itself on those versions (notably macOS's system bash 3.2; see the PR's "Known limitations"),
+/// not something a test workaround should paper over: on such a bash, both of the tests below
+/// would either fail (the "tags" case) or pass vacuously without exercising the absent-function
+/// branch at all (the "declines" case just happens to expect the same empty result `bind -X`'s
+/// absence always produces). Skip both rather than let the latter masquerade as real coverage.
 fn bash_supports_bind_dash_capital_x() -> Option<bool> {
-    Some(bash_major_version()? >= 4)
+    Some(bash_version()? >= (4, 3))
 }
 
 /// Regression test for the ctrl-t equivalent of bash's `declare -F __atuin_history` guard on the
