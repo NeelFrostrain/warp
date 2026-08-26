@@ -191,6 +191,7 @@ fn create_test_server_metadata(
             platform_usage_in_cents_for_last_block: None,
             charged_usage_for_last_block: None,
             total_charged_usage: None,
+            total_charged_usage_by_model: Default::default(),
             token_usage: vec![],
             tool_usage_metadata: Default::default(),
             context_window_segments: Vec::new(),

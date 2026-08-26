@@ -435,6 +435,13 @@ impl UsagePopoverView {
         } else {
             Icon::ChevronRight
         };
+        // The label is wrapped in `Expanded` at both this level and the
+        // summary row below: a plain (non-flex) `Text` in a `Flex::row` sizes
+        // to its own intrinsic width regardless of the row's available
+        // space, so a long model name would push the trailing token/cost
+        // value off the edge of the popover instead of being ellipsis-
+        // clipped. `Expanded` bounds it to whatever space remains after its
+        // row-siblings (chevron/swatch here, the value text below).
         let left = Flex::row()
             .with_cross_axis_alignment(CrossAxisAlignment::Center)
             .with_spacing(7.)
@@ -446,11 +453,15 @@ impl UsagePopoverView {
             )
             .with_child(render_swatch(color))
             .with_child(
-                Text::new(label, appearance.ui_font_family(), font_size)
-                    .with_color(blended_colors::text_main(theme, background))
-                    .soft_wrap(false)
-                    .with_clip(ClipConfig::ellipsis())
-                    .finish(),
+                Expanded::new(
+                    1.,
+                    Text::new(label, appearance.ui_font_family(), font_size)
+                        .with_color(blended_colors::text_main(theme, background))
+                        .soft_wrap(false)
+                        .with_clip(ClipConfig::ellipsis())
+                        .finish(),
+                )
+                .finish(),
             );
 
         let value = Text::new(
@@ -462,8 +473,8 @@ impl UsagePopoverView {
         .finish();
 
         let summary_row = space_between_row()
-            .with_child(left.finish())
-            .with_child(value)
+            .with_child(Expanded::new(1., left.finish()).finish())
+            .with_child(Container::new(value).with_margin_left(8.).finish())
             .finish();
 
         let mut column = Flex::column().with_spacing(6.).with_child(summary_row);

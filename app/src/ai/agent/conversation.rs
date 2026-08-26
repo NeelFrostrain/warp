@@ -358,14 +358,6 @@ pub struct AIConversation {
     /// updated in lockstep with this map (see
     /// [`Self::update_cost_and_usage_for_request`]).
     total_token_usage_by_model: HashMap<String, TokenUsage>,
-    /// Cumulative per-model charged-usage breakdown (input/output/
-    /// cache-read/cache-write cost + tokens, plus web-search count/cost),
-    /// derived from `StreamFinished.request_charges` and keyed the same way
-    /// as `total_token_usage_by_model` (custom-endpoint config keys are
-    /// resolved to their display alias). In-memory only, like
-    /// `total_token_usage_by_model` — not persisted, and empty until the
-    /// first response with charges arrives in this session.
-    total_charged_usage_by_model: HashMap<String, ChargedUsageTotals>,
     /// Server-authoritative cumulative provider cost in US cents. New
     /// conversations start at a known zero; restored legacy conversations can
     /// remain `None` until a server snapshot is available.
@@ -463,7 +455,6 @@ impl AIConversation {
             dismissed_suggestion_ids: Default::default(),
             total_request_cost: RequestCost::new(0.),
             total_token_usage_by_model: Default::default(),
-            total_charged_usage_by_model: Default::default(),
             total_provider_cost_in_cents: Some(0.),
             has_usage_metadata: false,
             fallback_display_title: None,
@@ -715,7 +706,6 @@ impl AIConversation {
             dismissed_suggestion_ids: Default::default(),
             total_request_cost: RequestCost::new(0.),
             total_token_usage_by_model: Default::default(),
-            total_charged_usage_by_model: Default::default(),
             total_provider_cost_in_cents,
             has_usage_metadata,
             optimistic_cli_subagent_subtask_id: None,
@@ -2653,6 +2643,7 @@ impl AIConversation {
                 });
             for (model_id, model_totals) in totals_by_model {
                 *self
+                    .conversation_usage_metadata
                     .total_charged_usage_by_model
                     .entry(model_id)
                     .or_default() += model_totals;
@@ -4219,11 +4210,14 @@ impl AIConversation {
 
     /// Cumulative per-model charged-usage breakdown (input/output/
     /// cache-read/cache-write cost + tokens, plus web-search count/cost),
-    /// keyed the same way as [`Self::total_token_usage`]. Empty until the
-    /// first response with charges arrives in this session (flag off, or no
+    /// keyed the same way as [`Self::total_token_usage`]. Persisted as part
+    /// of `conversation_usage_metadata`, so it survives restore. Empty until
+    /// a response with per-model charges has been received (flag off, or no
     /// completed request yet).
     pub fn charged_usage_by_model(&self) -> &HashMap<String, ChargedUsageTotals> {
-        &self.total_charged_usage_by_model
+        &self
+            .conversation_usage_metadata
+            .total_charged_usage_by_model
     }
 
     /// Compact usage totals for lightweight displays (e.g. the TUI footer's

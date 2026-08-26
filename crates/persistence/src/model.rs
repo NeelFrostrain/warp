@@ -1883,6 +1883,15 @@ pub struct ConversationUsageMetadata {
     /// didn't provide it (flag off, or a legacy conversation).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub total_charged_usage: Option<ChargedUsageTotals>,
+    /// Cumulative per-model charged-usage breakdown (input/output/
+    /// cache-read/cache-write cost + tokens, plus web-search count/cost),
+    /// keyed the same way as `token_usage`'s model ids (custom-endpoint
+    /// config keys are resolved to their display alias before insertion, so
+    /// the two can be joined by key). `#[serde(default)]` so blobs persisted
+    /// before this field existed still deserialize; empty until a response
+    /// with per-model charges has been received for this conversation.
+    #[serde(default)]
+    pub total_charged_usage_by_model: HashMap<String, ChargedUsageTotals>,
     #[serde(default)]
     pub token_usage: Vec<ModelTokenUsage>,
     #[serde(default)]
