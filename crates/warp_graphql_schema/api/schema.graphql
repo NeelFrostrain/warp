@@ -4217,10 +4217,6 @@ input UpdateAgentTaskInput {
   debugAgentActive: Boolean
 
   """
-  Identifies the setup-failure debug turn represented by this update.
-  """
-  debugTurnId: ID
-  """
   When a failed run's shared session stops being held open for debugging.
   
   The agent process owns that window and reports this on arm and on each refresh, so the

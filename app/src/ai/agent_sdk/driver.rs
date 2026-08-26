@@ -1304,7 +1304,6 @@ impl AgentDriver {
                             None,
                             None,
                             None,
-                            None,
                         )
                         .await
                         .context("Failed to update agent task state to InProgress")
@@ -1648,7 +1647,6 @@ impl AgentDriver {
             .update_agent_task(
                 task_id,
                 Some(AgentTaskState::Succeeded),
-                None,
                 None,
                 None,
                 None,
@@ -2222,7 +2220,6 @@ impl AgentDriver {
                     None,
                     None,
                     Some(TaskStatusUpdate::message(message)),
-                    None,
                     None,
                     None,
                 )
@@ -3497,7 +3494,7 @@ impl AgentDriver {
                     me.publish_debug_window_deadline(
                         window,
                         Some(true),
-                        Some((AgentTaskState::InProgress, *conversation_id)),
+                        Some(AgentTaskState::InProgress),
                         ctx,
                     );
                 }
@@ -3511,7 +3508,7 @@ impl AgentDriver {
                 me.publish_debug_window_deadline(
                     window,
                     Some(controller.is_pinned()),
-                    debug_turn_task_state(new_status).map(|state| (state, *conversation_id)),
+                    debug_turn_task_state(new_status),
                     ctx,
                 );
             }
@@ -3529,7 +3526,7 @@ impl AgentDriver {
         &mut self,
         window: Duration,
         debug_agent_active: Option<bool>,
-        debug_turn: Option<(AgentTaskState, AIConversationId)>,
+        task_state: Option<AgentTaskState>,
         ctx: &mut ModelContext<Self>,
     ) {
         const MIN_PUBLISH_INTERVAL: Duration = Duration::from_secs(30);
@@ -3542,7 +3539,7 @@ impl AgentDriver {
             now.duration_since(last)
                 .is_ok_and(|elapsed| elapsed < MIN_PUBLISH_INTERVAL)
         });
-        if deadline_throttled && debug_agent_active.is_none() && debug_turn.is_none() {
+        if deadline_throttled && debug_agent_active.is_none() && task_state.is_none() {
             return;
         }
         self.last_published_debug_deadline = Some(now);
@@ -3550,9 +3547,6 @@ impl AgentDriver {
         // A throttled republish still needs a deadline value, so a debug_agent_active-only
         // update doesn't omit `session_debug_until` entirely.
         let deadline = debug_window_deadline(window);
-        let (task_state, debug_turn_id) = debug_turn
-            .map(|(state, turn_id)| (Some(state), Some(turn_id.to_string())))
-            .unwrap_or_default();
         let ai_client = ServerApiProvider::as_ref(ctx).get_ai_client();
         ctx.spawn(
             async move {
@@ -3565,7 +3559,6 @@ impl AgentDriver {
                         None,
                         Some(deadline),
                         debug_agent_active,
-                        debug_turn_id,
                     )
                     .await
             },
@@ -3612,7 +3605,6 @@ impl AgentDriver {
                 None,
                 Some(status),
                 Some(deadline),
-                None,
                 None,
             )
             .await
@@ -4803,7 +4795,6 @@ impl AgentDriver {
                                         None,
                                         None,
                                         None,
-                                        None,
                                     )
                                     .await
                                     .context("Error setting ambient agent shared session ID")
@@ -5123,7 +5114,6 @@ pub(super) async fn report_driver_error(
             None,
             None,
             Some(status_update),
-            None,
             None,
             None,
         )
