@@ -1889,87 +1889,17 @@ impl PendingCtrlTHandoff {
     }
 }
 
-/// Directory the ctrl-t draft handoff file (see [`write_ctrl_t_draft_file`]) is written into:
-/// `$XDG_RUNTIME_DIR` when set, since it's the per-user, non-persistent directory most Linux
-/// distros provide; `/tmp` otherwise. Must match the fallback the fish helper computes for itself
-/// from its own environment -- see `warp_run_external_ctrl_t_widget` in `fish.sh`.
-fn ctrl_t_draft_file_dir() -> PathBuf {
-    std::env::var_os("XDG_RUNTIME_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("/tmp"))
-}
-
-/// Path of the ctrl-t draft handoff file for `token` (see [`write_ctrl_t_draft_file`]).
-fn ctrl_t_draft_file_path(token: &str) -> PathBuf {
-    ctrl_t_draft_file_dir().join(format!("warp-ctrl-t-{token}"))
-}
-
-/// Writes the draft line and cursor the fish ctrl-t helper seeds `fzf-file-widget` with (see
-/// [`CtrlTApplyMode::Replace`]), so its token-aware replacement operates on the real in-progress
-/// command rather than an empty line. Bash/zsh never call this: their helper searches
-/// independently of the draft and reports a plain path for Warp to splice in itself.
-///
-/// Created with owner-only (0600) permissions from the moment the file exists -- this may contain
-/// in-progress command text the user hasn't run yet, and creating the file before restricting its
-/// permissions would leave a window where another local user could read it. The format is
-/// `{char_cursor}\0{original_buffer}\0` -- NUL-delimited, not newline-delimited, because the fish
-/// reader captures the file through a plain command substitution, which unconditionally strips
-/// trailing newline bytes from what it captures before any splitting happens; a newline-delimited
-/// format would silently lose a trailing newline that's genuinely part of the draft. A shell
-/// command buffer cannot itself contain a NUL byte, so it's an unambiguous delimiter fish can
-/// split back out with `string split0` unaffected by that stripping. `char_cursor` is
-/// `cursor_offset` converted to a character offset, since fish's `commandline -C` takes
-/// characters while `cursor_offset` is a byte offset.
-fn write_ctrl_t_draft_file(
-    token: &str,
-    original_buffer: &str,
-    cursor_offset: ByteOffset,
-) -> anyhow::Result<()> {
-    use std::io::Write as _;
-
-    write_ctrl_t_draft_file_with_writer(
-        token,
-        original_buffer,
-        cursor_offset,
-        |file, char_cursor, original_buffer| {
-            write!(file, "{char_cursor}\0")?;
-            file.write_all(original_buffer.as_bytes())?;
-            file.write_all(b"\0")
-        },
-    )
-}
-
-/// Implementation of [`write_ctrl_t_draft_file`], taking the write step as a parameter so tests
-/// can inject a failure partway through without needing a real filesystem-level write failure.
-///
-/// Cleans up the file it created if `write` fails: at that point the file already exists and may
-/// hold a partially-written in-progress command line, which leaving behind would defeat the
-/// owner-only permissions below just as thoroughly as never cleaning it up on success.
-fn write_ctrl_t_draft_file_with_writer(
-    token: &str,
-    original_buffer: &str,
-    cursor_offset: ByteOffset,
-    write: impl FnOnce(&mut std::fs::File, usize, &str) -> std::io::Result<()>,
-) -> anyhow::Result<()> {
-    #[cfg(unix)]
-    use std::os::unix::fs::OpenOptionsExt as _;
-
-    use anyhow::Context as _;
-
+/// Encodes the draft line and cursor the fish ctrl-t helper seeds `fzf-file-widget` with (see
+/// [`CtrlTApplyMode::Replace`]) as a single `{char_cursor}:{hex_draft}` argument: hex keeps the
+/// draft a single token, and combining it with the cursor avoids an empty hex field (an empty
+/// draft) vanishing under the shell's own word-splitting, since the invocation is typed into the
+/// terminal as literal text for the shell to parse. `char_cursor` is `cursor_offset` converted to
+/// a character offset, since fish's `commandline -C` takes characters while `cursor_offset` is a
+/// byte offset. Bash/zsh never call this: their helper searches independently of the draft and
+/// reports a plain path for Warp to splice in itself.
+fn ctrl_t_draft_arg(original_buffer: &str, cursor_offset: ByteOffset) -> String {
     let char_cursor = original_buffer[..cursor_offset.as_usize()].chars().count();
-    let path = ctrl_t_draft_file_path(token);
-    let mut options = std::fs::OpenOptions::new();
-    options.write(true).create_new(true);
-    #[cfg(unix)]
-    options.mode(0o600);
-    let mut file = options
-        .open(&path)
-        .with_context(|| format!("failed to create {}", path.display()))?;
-    if let Err(error) = write(&mut file, char_cursor, original_buffer) {
-        let _ = std::fs::remove_file(&path);
-        return Err(error).with_context(|| format!("failed to write {}", path.display()));
-    }
-    Ok(())
+    format!("{char_cursor}:{}", hex::encode(original_buffer))
 }
 
 struct AmbientAgentViewState {
@@ -7777,11 +7707,10 @@ impl Input {
     /// See [`Self::trigger_external_ctrl_r_history_search`] for why the command is prefixed with
     /// a leading space.
     ///
-    /// When `apply_mode` is [`CtrlTApplyMode::Replace`], also writes the draft handoff file (see
-    /// [`write_ctrl_t_draft_file`]) the fish helper reads to seed its widget with the real draft
-    /// line and cursor; a failure to write it aborts the trigger entirely; bash/zsh never need
-    /// this file, since their helper searches independently of the draft and reports a plain path
-    /// for Warp to splice in itself.
+    /// When `apply_mode` is [`CtrlTApplyMode::Replace`], the command is also given the draft line
+    /// and cursor for the fish helper to seed its widget with (see [`ctrl_t_draft_arg`]);
+    /// bash/zsh never need this, since their helper searches independently of the draft and
+    /// reports a plain path for Warp to splice in itself.
     pub fn trigger_external_ctrl_t_file_search(
         &mut self,
         helper_command: &str,
@@ -7798,13 +7727,13 @@ impl Input {
             .end_byte_index_of_last_selection(ctx);
         let block_id = self.model.lock().block_list().active_block_id().clone();
         let token = Uuid::new_v4().to_string();
-        if apply_mode == CtrlTApplyMode::Replace
-            && let Err(error) = write_ctrl_t_draft_file(&token, &original_buffer, cursor_offset)
-        {
-            report_error!(error.context("failed to write ctrl-t draft handoff file"));
-            return false;
+        let mut command = format!(" {helper_command} {token}");
+        if apply_mode == CtrlTApplyMode::Replace {
+            command.push_str(&format!(
+                " {}",
+                ctrl_t_draft_arg(&original_buffer, cursor_offset)
+            ));
         }
-        let command = format!(" {helper_command} {token}");
         let started =
             self.try_execute_command_from_source(&command, CommandExecutionSource::User, ctx);
         if started {
@@ -7817,9 +7746,6 @@ impl Input {
                 block_id,
                 apply_mode,
             });
-        } else if apply_mode == CtrlTApplyMode::Replace {
-            // The helper never ran, so it will never clean up the draft file it would have read.
-            let _ = std::fs::remove_file(ctrl_t_draft_file_path(&token));
         }
         started
     }

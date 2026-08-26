@@ -2321,75 +2321,34 @@ fn ctrl_t_apply_mode_forks_between_splice_and_replace_for_the_same_draft() {
 /// character, for 6 bytes and 5 characters total) must have that byte offset converted, not
 /// copied verbatim, or the widget would seed itself at the wrong position for any non-ASCII draft.
 #[test]
-fn write_ctrl_t_draft_file_converts_byte_cursor_to_char_cursor_for_multi_byte_draft() {
+fn ctrl_t_draft_arg_converts_byte_cursor_to_char_cursor_for_multi_byte_draft() {
     let original_buffer = "caf\u{e9} ls";
     // Byte offset right after "café " (the \u{e9} is 2 bytes), which is character offset 5.
     let cursor_offset = ByteOffset::from("caf\u{e9} ".len());
-    let token = format!("test-{}", Uuid::new_v4());
-    write_ctrl_t_draft_file(&token, original_buffer, cursor_offset)
-        .expect("draft file should be writable in a test environment");
-    let path = ctrl_t_draft_file_path(&token);
-    let contents = std::fs::read_to_string(&path).expect("draft file should have been written");
-    std::fs::remove_file(&path).ok();
+    let arg = ctrl_t_draft_arg(original_buffer, cursor_offset);
 
-    let (cursor_field, rest) = contents
-        .split_once('\0')
-        .expect("the draft file must be NUL-delimited");
+    let (char_cursor, hex_draft) = arg
+        .split_once(':')
+        .expect("the arg must be colon-delimited");
     assert_eq!(
-        cursor_field, "5",
-        "the cursor must be written as a character offset, not the byte offset"
+        char_cursor, "5",
+        "the cursor must be encoded as a character offset, not the byte offset"
     );
     assert_eq!(
-        rest.strip_suffix('\0'),
-        Some(original_buffer),
-        "the draft must be written verbatim, NUL-terminated"
+        hex::decode(hex_draft).expect("the draft must be valid hex"),
+        original_buffer.as_bytes(),
+        "the draft must be hex-encoded verbatim"
     );
 }
 
-/// The draft file may hold an in-progress command line the user hasn't run yet, so it must never
-/// be readable by another local user, even for the instant between creation and its first write.
-#[cfg(unix)]
+/// An empty draft (ctrl-t on a blank line) is the ordinary, not edge, case: the hex field for it
+/// is empty, so the cursor and draft must stay combined into one argument rather than passed
+/// separately, or the empty field would vanish under the shell's own word-splitting once the
+/// invocation is typed into the terminal as literal text.
 #[test]
-fn write_ctrl_t_draft_file_is_created_with_owner_only_permissions() {
-    use std::os::unix::fs::PermissionsExt as _;
-
-    let token = format!("test-{}", Uuid::new_v4());
-    write_ctrl_t_draft_file(&token, "echo hi", ByteOffset::from(7))
-        .expect("draft file should be writable in a test environment");
-    let path = ctrl_t_draft_file_path(&token);
-    let mode = std::fs::metadata(&path)
-        .expect("draft file should have been written")
-        .permissions()
-        .mode();
-    std::fs::remove_file(&path).ok();
-
-    assert_eq!(
-        mode & 0o777,
-        0o600,
-        "the draft file must be owner-only (0600) from the moment it exists"
-    );
-}
-
-/// The draft file may hold a partially-written in-progress command line if the write fails after
-/// creation; leaving it behind would defeat the owner-only permissions above just as thoroughly as
-/// never cleaning it up on success.
-#[test]
-fn write_ctrl_t_draft_file_removes_the_file_when_the_write_fails() {
-    let token = format!("test-{}", Uuid::new_v4());
-    let result = write_ctrl_t_draft_file_with_writer(
-        &token,
-        "echo hi",
-        ByteOffset::from(7),
-        |_file, _char_cursor, _original_buffer| {
-            Err(std::io::Error::other("simulated write failure"))
-        },
-    );
-
-    assert!(result.is_err(), "a write failure must be propagated");
-    assert!(
-        !ctrl_t_draft_file_path(&token).exists(),
-        "the draft file must not be left behind when the write fails"
-    );
+fn ctrl_t_draft_arg_keeps_empty_draft_and_cursor_as_one_token() {
+    let arg = ctrl_t_draft_arg("", ByteOffset::from(0));
+    assert_eq!(arg, "0:");
 }
 
 /// While `ShellWidgetHandoff` is disabled (its default state, matching a user who hasn't opted

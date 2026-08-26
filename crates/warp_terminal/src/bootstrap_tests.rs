@@ -513,95 +513,74 @@ printf 'result=[%s]\n' "$result"
     );
 }
 
-fn fish_ctrl_t_draft_decode_snippet() -> &'static str {
+/// Hex-encodes `s` the way [`ctrl_t_draft_arg`] does, for building test `{char_cursor}:{hex}`
+/// arguments without depending on fish's own `warp_hex_encode_string`.
+fn hex_encode(s: &str) -> String {
+    s.bytes().map(|b| format!("{b:02x}")).collect()
+}
+
+fn fish_hex_decode_string_fn() -> &'static str {
     const FISH_SH: &str = include_str!("../../../app/assets/bundled/bootstrap/fish.sh");
-    // Structural, not literal-text, boundaries (see `fish_ctrl_t_widget_result_fn` above) so a
-    // behavioral change to the reconstruction logic changes what the test observes.
-    let start_marker = "if test -f \"$draft_file\"\n";
+    let start_marker = "function warp_hex_decode_string\n";
     let start = FISH_SH
         .find(start_marker)
-        .expect("fish ctrl-t draft decode snippet start should exist");
-    let end_marker = "\n      end\n";
+        .expect("fish hex decode function start should exist");
+    let end_marker = "\nend\n";
     let end = FISH_SH[start..]
         .find(end_marker)
-        .expect("fish ctrl-t draft decode snippet end should exist");
+        .expect("fish hex decode function end should exist");
     &FISH_SH[start..start + end + end_marker.len()]
 }
 
-/// Writes a NUL-delimited draft file matching [`Input::write_ctrl_t_draft_file`]'s format
-/// (`{char_cursor}\0{draft}\0`) directly, rather than going through the Rust writer, so these
-/// fish-side decode tests exercise exactly the bytes fish reads without depending on the writer
-/// under a separate set of tests.
-fn write_decode_test_draft_file(char_cursor: u32, draft: &str) -> std::path::PathBuf {
-    let draft_file =
-        std::env::temp_dir().join(format!("warp-ctrl-t-decode-test-{}", uuid::Uuid::new_v4()));
-    std::fs::write(&draft_file, format!("{char_cursor}\0{draft}\0"))
-        .expect("should write test draft file");
-    draft_file
+/// The `string split` + `warp_hex_decode_string` argument-parsing step inside
+/// `warp_run_external_ctrl_t_widget`, extracted on its own (not via the full widget runner) so a
+/// dedicated test can assert the decoded `char_cursor`/`original_line` directly. The two
+/// full-widget tests below can't catch a corrupted split or decode by themselves: the same
+/// corrupted value seeds both sides of `warp_ctrl_t_widget_result`'s equality check and cancels
+/// out.
+fn fish_ctrl_t_argument_parsing_snippet() -> &'static str {
+    const FISH_SH: &str = include_str!("../../../app/assets/bundled/bootstrap/fish.sh");
+    // Structural, not literal-text, boundaries (see `fish_ctrl_t_widget_result_fn` above) so a
+    // behavioral change to the parsing logic itself changes what the test observes.
+    let start_marker = "set -l warp_ctrl_t_parts (string split -m 1 -- ':' \"$argv[2]\")\n";
+    let start = FISH_SH
+        .find(start_marker)
+        .expect("fish ctrl-t argument parsing snippet start should exist");
+    let end_marker = "--allow-empty)\n";
+    let end = FISH_SH[start..]
+        .find(end_marker)
+        .expect("fish ctrl-t argument parsing snippet end should exist");
+    &FISH_SH[start..start + end + end_marker.len()]
 }
 
-/// Regression test for the fish decode path (`warp_run_external_ctrl_t_widget` reading back the
-/// draft file), not just the Rust file writer: a multiline in-progress command must survive
-/// reconstruction intact. An unquoted command substitution splits `cat`'s output into a list by
-/// newline, so reconstructing that split without care (see the comment on `warp_ctrl_t_widget`'s
-/// reconstruction line) can silently drop embedded newlines back out -- exercising only the write
-/// side can never catch that, since the bug is entirely in how fish re-reads what was written.
+/// Regression test for the argument-parsing step alone, asserting the decoded `char_cursor` and
+/// `original_line` directly against a draft with both an embedded and a trailing newline -- the
+/// case that requires `string collect --no-trim-newlines`, not just `warp_hex_decode_string`
+/// itself, to survive intact.
 #[test]
-fn test_fish_ctrl_t_draft_decode_preserves_multiline_drafts() {
-    let decode_snippet = fish_ctrl_t_draft_decode_snippet();
-    let draft_file = write_decode_test_draft_file(8, "echo one\necho two");
-    let draft_file_path = draft_file.display().to_string();
+fn test_fish_ctrl_t_argument_parsing_decodes_multiline_trailing_newline_draft() {
+    let hex_decode_fn = fish_hex_decode_string_fn();
+    let parsing_snippet = fish_ctrl_t_argument_parsing_snippet();
+    let hex_draft = hex_encode("echo one\ntwo\n");
     let script = format!(
         r#"
-set -l draft_file '{draft_file_path}'
-set -l char_cursor 0
-set -l original_line ''
-{decode_snippet}
-printf 'char_cursor=[%s]\n' "$char_cursor"
-printf 'original_line=[%s]\n' "$original_line"
+{hex_decode_fn}
+function warp_ctrl_t_test_parse
+  {parsing_snippet}
+  printf 'char_cursor=[%s]\n' "$char_cursor"
+  printf 'original_line=[%s]\n' "$original_line"
+end
+warp_ctrl_t_test_parse test-token '8:{hex_draft}'
 "#
     );
-    let stdout = run_fish(&script);
-    std::fs::remove_file(&draft_file).ok();
-    let Some(stdout) = stdout else {
+    let Some(stdout) = run_fish(&script) else {
         return;
     };
     assert!(stdout.contains("char_cursor=[8]"), "{stdout}");
     assert!(
-        stdout.contains("original_line=[echo one\necho two]"),
+        stdout.contains("original_line=[echo one\ntwo\n]"),
         "{stdout}"
     );
-}
-
-/// Regression test for a draft whose *last* character is a newline (e.g. a trailing blank line
-/// mid-multiline edit): a plain command substitution -- `(command cat -- $draft_file)` --
-/// unconditionally strips trailing newline bytes from what it captures before any splitting
-/// happens, which is exactly why the decode format is NUL-delimited (see
-/// `Input::write_ctrl_t_draft_file`) rather than reconstructed from a newline-split list. The
-/// multiline test above only covers an *embedded* newline, which that stripping doesn't touch --
-/// this is the case it would silently corrupt.
-#[test]
-fn test_fish_ctrl_t_draft_decode_preserves_trailing_newline() {
-    let decode_snippet = fish_ctrl_t_draft_decode_snippet();
-    let draft_file = write_decode_test_draft_file(3, "echo hi\n");
-    let draft_file_path = draft_file.display().to_string();
-    let script = format!(
-        r#"
-set -l draft_file '{draft_file_path}'
-set -l char_cursor 0
-set -l original_line ''
-{decode_snippet}
-printf 'char_cursor=[%s]\n' "$char_cursor"
-printf 'original_line=[%s]\n' "$original_line"
-"#
-    );
-    let stdout = run_fish(&script);
-    std::fs::remove_file(&draft_file).ok();
-    let Some(stdout) = stdout else {
-        return;
-    };
-    assert!(stdout.contains("char_cursor=[3]"), "{stdout}");
-    assert!(stdout.contains("original_line=[echo hi\n]"), "{stdout}");
 }
 
 fn fish_ctrl_t_widget_runner_fn() -> &'static str {
@@ -617,29 +596,24 @@ fn fish_ctrl_t_widget_runner_fn() -> &'static str {
     &FISH_SH[start..start + end + end_marker.len()]
 }
 
-fn fish_ctrl_t_draft_file_path_fn() -> &'static str {
-    const FISH_SH: &str = include_str!("../../../app/assets/bundled/bootstrap/fish.sh");
-    let start_marker = "function warp_ctrl_t_draft_file_path\n";
-    let start = FISH_SH
-        .find(start_marker)
-        .expect("fish ctrl-t draft file path function start should exist");
-    let end_marker = "\nend\n";
-    let end = FISH_SH[start..]
-        .find(end_marker)
-        .expect("fish ctrl-t draft file path function end should exist");
-    &FISH_SH[start..start + end + end_marker.len()]
-}
-
 /// Builds a script that runs the full `warp_run_external_ctrl_t_widget` (not just the
-/// `warp_ctrl_t_widget_result` comparison helper in isolation) against a real draft file, so the
-/// `(commandline | string collect)` argument at its `fzf-file-widget` call site is exercised too
-/// -- unquoted, a multi-line result there would otherwise expand to multiple arguments, silently
-/// truncating that comparison to the result's first line alone. `commandline` is stubbed
-/// statefully (supporting the `-r --` and `-C --` forms the widget actually calls, plus a plain
-/// read) rather than as a fixed value, since the widget both seeds and reads it back.
-fn fish_ctrl_t_widget_test_script(xdg_runtime_dir: &str, widget_body: &str) -> String {
+/// `warp_ctrl_t_widget_result` comparison helper in isolation) against a real `{char_cursor}:{hex}`
+/// argument, so the `(commandline | string collect)` argument at its `fzf-file-widget` call site
+/// is exercised too -- unquoted, a multi-line result there would otherwise expand to multiple
+/// arguments, silently truncating that comparison to the result's first line alone. `commandline`
+/// is stubbed statefully (supporting the `-r --` and `-C --` forms the widget actually calls,
+/// plus a plain read) rather than as a fixed value, since the widget both seeds and reads it
+/// back. The read stub uses `echo`, matching the real builtin's own bare-read behavior of always
+/// terminating its output with a newline regardless of the buffer's actual content -- a stub that
+/// used `printf '%s'` instead would silently hide a regression in the comparison's own newline
+/// handling. The `-r` stub also distinguishes a *read* (no CMD argument at all, i.e.
+/// `$argv[3..]` is empty) from a *write*, matching real fish semantics -- a stub that always
+/// wrote, even with nothing to write, would silently hide a regression that fails to seed an
+/// empty draft. `_test_cl_value` starts as a non-empty sentinel rather than `''`, so a failure to
+/// seed (leaving the sentinel in place) is distinguishable from a correctly-seeded empty draft.
+fn fish_ctrl_t_widget_test_script(ctrl_t_arg: &str, widget_body: &str) -> String {
     let runner = fish_ctrl_t_widget_runner_fn();
-    let draft_file_path_fn = fish_ctrl_t_draft_file_path_fn();
+    let hex_decode_fn = fish_hex_decode_string_fn();
     let widget_result_fn = fish_ctrl_t_widget_result_fn();
     format!(
         r#"
@@ -654,13 +628,16 @@ end
 function warp_send_json_message
   echo "$argv"
 end
-set -gx XDG_RUNTIME_DIR '{xdg_runtime_dir}'
-{draft_file_path_fn}
+{hex_decode_fn}
 {widget_result_fn}
-set -g _test_cl_value ''
+set -g _test_cl_value 'UNSEEDED-SENTINEL'
 function commandline
   if test (count $argv) -ge 1; and test "$argv[1]" = '-r'
-    set -g _test_cl_value (string join \n -- $argv[3..] | string collect)
+    if test (count $argv[3..]) -eq 0
+      # No CMD argument at all is a read, not a write -- must leave $_test_cl_value untouched.
+      return 0
+    end
+    set -g _test_cl_value (string collect --no-trim-newlines -- $argv[3..])
     return 0
   end
   if test (count $argv) -ge 1; and test "$argv[1]" = '-C'
@@ -674,20 +651,9 @@ end
 set -g _WARP_EXTERNAL_CTRL_T_WIDGET fzf-file-widget
 set -g WARP_SESSION_ID 12345
 {runner}
-warp_run_external_ctrl_t_widget test-token
+warp_run_external_ctrl_t_widget test-token '{ctrl_t_arg}'
 "#
     )
-}
-
-/// Writes a NUL-delimited draft file matching [`Input::write_ctrl_t_draft_file`]'s format (see
-/// `write_decode_test_draft_file` above) at the path the widget under test will look for.
-fn write_ctrl_t_test_draft(xdg_runtime_dir: &std::path::Path, char_cursor: u32, draft: &str) {
-    std::fs::create_dir_all(xdg_runtime_dir).expect("should create test XDG_RUNTIME_DIR");
-    std::fs::write(
-        xdg_runtime_dir.join("warp-ctrl-t-test-token"),
-        format!("{char_cursor}\0{draft}\0"),
-    )
-    .expect("should write test draft file");
 }
 
 /// Regression test for the `(commandline | string collect)` argument at the widget's
@@ -697,16 +663,12 @@ fn write_ctrl_t_test_draft(xdg_runtime_dir: &std::path::Path, char_cursor: u32, 
 /// selection's first line alone.
 #[test]
 fn test_fish_ctrl_t_widget_reports_full_multiline_change_without_truncation() {
-    let xdg_runtime_dir =
-        std::env::temp_dir().join(format!("warp-ctrl-t-widget-test-{}", uuid::Uuid::new_v4()));
-    write_ctrl_t_test_draft(&xdg_runtime_dir, 10, "echo START\nMIDDLE");
+    let hex_draft = hex_encode("echo START\nMIDDLE");
     let script = fish_ctrl_t_widget_test_script(
-        &xdg_runtime_dir.display().to_string(),
+        &format!("10:{hex_draft}"),
         "commandline -r -- (printf 'echo START\\nMIDDLE nested.rs ' | string collect)",
     );
-    let stdout = run_fish(&script);
-    std::fs::remove_dir_all(&xdg_runtime_dir).ok();
-    let Some(stdout) = stdout else {
+    let Some(stdout) = run_fish(&script) else {
         return;
     };
     assert!(
@@ -722,17 +684,44 @@ fn test_fish_ctrl_t_widget_reports_full_multiline_change_without_truncation() {
 /// of the empty buffer this "unchanged" case is supposed to produce.
 #[test]
 fn test_fish_ctrl_t_widget_reports_empty_when_multiline_draft_is_left_unchanged() {
-    let xdg_runtime_dir =
-        std::env::temp_dir().join(format!("warp-ctrl-t-widget-test-{}", uuid::Uuid::new_v4()));
-    write_ctrl_t_test_draft(&xdg_runtime_dir, 10, "echo START\nMIDDLE");
-    let script =
-        fish_ctrl_t_widget_test_script(&xdg_runtime_dir.display().to_string(), "# cancelled");
-    let stdout = run_fish(&script);
-    std::fs::remove_dir_all(&xdg_runtime_dir).ok();
-    let Some(stdout) = stdout else {
+    let hex_draft = hex_encode("echo START\nMIDDLE");
+    let script = fish_ctrl_t_widget_test_script(&format!("10:{hex_draft}"), "# cancelled");
+    let Some(stdout) = run_fish(&script) else {
         return;
     };
     assert!(stdout.contains(r#""buffer": """#), "{stdout}");
+}
+
+/// Regression test for a plain, single-line, unchanged draft on cancel: a bare `commandline` read
+/// always terminates its own output with a newline regardless of the buffer's actual content, so
+/// comparing it against `original_line` with `--no-trim-newlines` (rather than the default,
+/// trimming `string collect`) would make an ordinary, single-line cancel always compare unequal
+/// to itself, misreporting the cancel as a real selection.
+#[test]
+fn test_fish_ctrl_t_widget_reports_empty_when_single_line_draft_is_left_unchanged() {
+    let hex_draft = hex_encode("echo START MIDDLE");
+    let script = fish_ctrl_t_widget_test_script(&format!("11:{hex_draft}"), "# cancelled");
+    let Some(stdout) = run_fish(&script) else {
+        return;
+    };
+    assert!(stdout.contains(r#""buffer": """#), "{stdout}");
+}
+
+/// Regression test for an empty draft (ctrl-t on a blank line): decoding zero bytes must still
+/// seed the commandline with an explicit empty buffer, not skip seeding altogether.
+/// `warp_hex_decode_string` on an empty hex string produces no output at all, and piping that
+/// through plain `string collect` collapses to zero list elements rather than one empty string --
+/// so `commandline -r --` would receive no CMD argument, which fish treats as a *read*, leaving
+/// whatever was already on the commandline (here, the sentinel standing in for the synthetic
+/// helper invocation itself) in place instead of clearing it.
+#[test]
+fn test_fish_ctrl_t_widget_seeds_blank_buffer_for_empty_draft() {
+    let script = fish_ctrl_t_widget_test_script("0:", "# cancelled");
+    let Some(stdout) = run_fish(&script) else {
+        return;
+    };
+    assert!(stdout.contains(r#""buffer": """#), "{stdout}");
+    assert!(!stdout.contains("UNSEEDED-SENTINEL"), "{stdout}");
 }
 
 /// Regression test for the fish equivalent of bash's picker-function guard: detection must

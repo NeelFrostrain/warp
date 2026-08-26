@@ -68,6 +68,11 @@ function warp_hex_encode_string
   printf '%s' "$argv" | od -An -v -tx1 | command tr -d ' \n'
 end
 
+# warp_hex_decode_string decodes a string hex-encoded by warp_hex_encode_string.
+function warp_hex_decode_string
+  printf '%b' (string replace --all --regex '(..)' '\\\\x$1' -- "$argv")
+end
+
 # A list of PIDs for running in-band command(s). This is used to kill running
 # in-band commands in preexec for a user command, so they do not interfere with
 # user command output.
@@ -602,16 +607,6 @@ function warp_run_external_ctrl_r_widget
   warp_send_json_message "{ \"hook\": \"ExternalCtrlRSelection\", \"value\": { \"buffer\": \"$warp_escaped_selection\", \"token\": \"$warp_escaped_token\", \"session_id\": $WARP_SESSION_ID } }"
 end
 
-# Locates the draft handoff file Warp writes just before typing this helper's invocation into the
-# terminal (see Input::write_ctrl_t_draft_file), identified by the handoff token given as
-# $argv[1]. $XDG_RUNTIME_DIR must mirror the fallback Warp's own write uses, or this looks in the
-# wrong place for a file Warp actually wrote elsewhere.
-function warp_ctrl_t_draft_file_path
-  set -l dir "$XDG_RUNTIME_DIR"
-  test -n "$dir"; or set dir /tmp
-  echo "$dir/warp-ctrl-t-$argv[1]"
-end
-
 function warp_ctrl_t_widget_result
   test "$argv[1]" = "$argv[2]"; or string collect -- "$argv[2]"
 end
@@ -628,6 +623,12 @@ end
 # is token-aware (see fzf's own __fzf_parse_commandline) and reproducing that parsing by hand
 # would either drop it or duplicate it badly.
 #
+# $argv[2] carries the real in-progress draft and cursor Warp seeds the widget with (see
+# Input::trigger_external_ctrl_t_file_search), as a single `{char_cursor}:{hex_draft}` token: hex
+# keeps the draft a single token, and combining it with the cursor avoids an empty hex field (an
+# empty draft) vanishing under the shell's own word-splitting when this invocation is typed into
+# the terminal as literal text for the shell to parse.
+#
 # fzf-file-widget has no way to report cancellation distinctly from a selection: on Escape it
 # leaves the commandline exactly as seeded, so its output is indistinguishable from a selection
 # that reproduces the original line. Collapse that case to an empty result, Warp's existing
@@ -639,29 +640,33 @@ function warp_run_external_ctrl_t_widget
   set -l result ""
   switch "$_WARP_EXTERNAL_CTRL_T_WIDGET"
     case 'fzf-file-widget'
-      set -l draft_file (warp_ctrl_t_draft_file_path "$warp_ctrl_t_token")
-      set -l original_line ''
-      set -l char_cursor 0
-      if test -f "$draft_file"
-        # NUL-delimited (see Input::write_ctrl_t_draft_file), not newline-delimited: a plain
-        # command substitution unconditionally strips trailing newline bytes from what it
-        # captures before any splitting happens, which would silently lose a trailing newline
-        # that's genuinely part of the draft. `string split0` splits on NUL only, so
-        # $draft_fields[2] is the draft verbatim -- embedded and trailing newlines included --
-        # with no further reconstruction needed.
-        set -l draft_fields (command cat -- "$draft_file" | string split0)
-        set char_cursor $draft_fields[1]
-        set original_line $draft_fields[2]
-      end
+      set -l warp_ctrl_t_parts (string split -m 1 -- ':' "$argv[2]")
+      set -l char_cursor $warp_ctrl_t_parts[1]
+      # --allow-empty: an empty draft (ctrl-t on a blank line) decodes to zero bytes, and
+      # `string collect` would otherwise collapse that to zero list elements rather than one
+      # empty string -- `commandline -r --` with no CMD argument at all is a *read*, not a
+      # write, so ctrl-t on a blank line would leave the synthetic helper invocation itself on
+      # the commandline instead of seeding a blank buffer.
+      set -l original_line (warp_hex_decode_string $warp_ctrl_t_parts[2] | string collect --no-trim-newlines --allow-empty)
       commandline -r -- $original_line
       commandline -C -- $char_cursor
       fzf-file-widget
       # (commandline | string collect), not plain (commandline): unquoted, a multi-line result
-      # would otherwise expand to multiple arguments here, silently truncating
+      # would otherwise expand to multiple arguments here, truncating
       # warp_ctrl_t_widget_result's $argv[2] comparison and return value to its first line alone.
-      set result (warp_ctrl_t_widget_result "$original_line" (commandline | string collect))
+      # Plain `string collect` (not --no-trim-newlines) here: a bare `commandline` read always
+      # ends its own output in a line terminator regardless of the buffer's actual content, so
+      # trimming it is what recovers the real buffer text -- keeping it would make an unchanged
+      # draft compare unequal to itself, misreporting a plain cancel as a real selection.
+      #
+      # Captured into $cl_readback first, not passed as a nested command substitution directly:
+      # confirmed live that reading `commandline` in that nested form immediately after
+      # fzf-file-widget's own `commandline -f repaint` on cancel can race that repaint and read
+      # back a stale value, so the comparison below sometimes saw a false change on an untouched
+      # cancel. Assigning it first, as its own statement, reliably reads the settled buffer.
+      set -l cl_readback (commandline | string collect)
+      set result (warp_ctrl_t_widget_result "$original_line" "$cl_readback")
       commandline -r ''
-      rm -f "$draft_file"
   end
   set -l warp_escaped_selection (warp_escape_json "$result")
   set -l warp_escaped_token (warp_escape_json "$warp_ctrl_t_token")
