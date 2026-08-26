@@ -2171,7 +2171,10 @@ impl AgentInputFooter {
         let tokens = totals
             .charged_usage
             .map(|usage| u64::from(usage.total_tokens()));
-        let tooltip = format_tokens_and_cost(tokens, totals.cost_in_cents);
+        let tooltip = format!(
+            "Conversation: {}",
+            format_tokens_and_cost(tokens, totals.cost_in_cents)
+        );
         self.usage_button.update(ctx, |button, ctx| {
             button.set_tooltip(Some(tooltip), ctx);
         });

@@ -24,16 +24,18 @@
 //! construction, so the popover's numbers update live while streaming
 //! (matching the existing per-block pill's live-update behavior).
 
+use std::cell::RefCell;
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 
 use pathfinder_color::ColorU;
+use pathfinder_geometry::vector::vec2f;
 use warp_core::ui::Icon;
 use warp_core::ui::theme::WarpTheme;
 use warpui::elements::{
-    Border, ConstrainedBox, Container, CornerRadius, CrossAxisAlignment, Dismiss,
+    Border, ChildAnchor, ConstrainedBox, Container, CornerRadius, CrossAxisAlignment, Dismiss,
     DispatchEventResult, Empty, EventHandler, Expanded, Flex, Hoverable, MainAxisAlignment,
-    MainAxisSize, MouseStateHandle, ParentElement, Radius, Text,
+    MainAxisSize, MouseStateHandle, ParentAnchor, ParentElement, Radius, Text,
 };
 use warpui::platform::Cursor;
 use warpui::text_layout::ClipConfig;
@@ -118,6 +120,14 @@ pub struct UsagePopoverView {
     /// Keyed by model id rather than a fixed set of fields since the list of
     /// models is dynamic per-conversation.
     expanded_model_ids: HashSet<String>,
+    /// Per-model hover state backing the "full model name" tooltip shown
+    /// over a truncated per-model row label. Lazily populated (keyed by
+    /// model id, mirroring `expanded_model_ids`) since the model list is
+    /// dynamic; wrapped in a `RefCell` so it can be populated from
+    /// `View::render`'s `&self`. A fresh `MouseStateHandle::default()` on
+    /// every render would never register as hovered, since the hover-in
+    /// delay needs a stable handle across renders to fire.
+    model_label_hover_states: RefCell<HashMap<String, MouseStateHandle>>,
     model_usage_toggle_mouse_state: MouseStateHandle,
     tool_call_summary_toggle_mouse_state: MouseStateHandle,
     response_time_toggle_mouse_state: MouseStateHandle,
@@ -137,6 +147,7 @@ impl UsagePopoverView {
             response_time_section_expanded: true,
             rollup_show_all: false,
             expanded_model_ids: HashSet::new(),
+            model_label_hover_states: RefCell::new(HashMap::new()),
             model_usage_toggle_mouse_state: MouseStateHandle::default(),
             tool_call_summary_toggle_mouse_state: MouseStateHandle::default(),
             response_time_toggle_mouse_state: MouseStateHandle::default(),
@@ -363,6 +374,13 @@ impl UsagePopoverView {
             .charged_usage
             .map(|charged_usage| charged_usage.platform_cost_in_cents);
 
+        // Hidden entirely (rather than shown as "$0.00") when there's no
+        // platform fee to report, e.g. conversations predating the
+        // server-side platform fee, or ones where it happens to be zero.
+        if platform_cost_in_cents.is_none_or(|cost| cost <= 0.) {
+            return Empty::new().finish();
+        }
+
         self.render_static_section_header_with_value(
             "PLATFORM USAGE",
             format_cost_only(platform_cost_in_cents),
@@ -447,7 +465,7 @@ impl UsagePopoverView {
         column.finish()
     }
 
-    /// Renders a per-model row. Every row is clickable (a leading chevron
+    /// Renders a per-model row. Every row is clickable (a trailing chevron
     /// indicates this) and toggles a breakdown subsection beneath it — an
     /// input/output/cache/web-search split when the model has a known
     /// charged-usage breakdown, or a fallback message when it doesn't (e.g.
@@ -463,7 +481,7 @@ impl UsagePopoverView {
         let color = color_for_model(&row.model_id);
         let expanded = self.expanded_model_ids.contains(&row.model_id);
 
-        let label = match row.role_badge {
+        let full_label = match row.role_badge {
             Some(role) => format!("{} ({role})", row.model_id),
             None => row.model_id.clone(),
         };
@@ -473,46 +491,82 @@ impl UsagePopoverView {
         } else {
             Icon::ChevronRight
         };
-        // The label is wrapped in `Expanded` at both this level and the
-        // summary row below: a plain (non-flex) `Text` in a `Flex::row` sizes
-        // to its own intrinsic width regardless of the row's available
-        // space, so a long model name would push the trailing token/cost
-        // value off the edge of the popover instead of being ellipsis-
-        // clipped. `Expanded` bounds it to whatever space remains after its
-        // row-siblings (chevron/swatch here, the value text below).
+
+        // Model name and role badge are separate `Text`s (rather than one
+        // formatted string) so they can use different colors. Only the name
+        // is wrapped in `Expanded` + ellipsis-clipping, so a long model name
+        // truncates while the role badge (e.g. "(Primary agent)") stays
+        // fully visible.
+        let mut label_row = Flex::row().with_cross_axis_alignment(CrossAxisAlignment::Center);
+        label_row.add_child(
+            Expanded::new(
+                1.,
+                Text::new(row.model_id.clone(), appearance.ui_font_family(), font_size)
+                    .with_color(blended_colors::text_main(theme, background))
+                    .soft_wrap(false)
+                    .with_clip(ClipConfig::ellipsis())
+                    .finish(),
+            )
+            .finish(),
+        );
+        if let Some(role) = row.role_badge {
+            label_row.add_child(
+                Text::new(format!(" ({role})"), appearance.ui_font_family(), font_size)
+                    .with_color(blended_colors::text_sub(theme, background))
+                    .finish(),
+            );
+        }
+
+        // A persistent per-model hover state is needed for the tooltip's
+        // hover-in delay to ever fire; see `model_label_hover_states`' docs.
+        let hover_state = self
+            .model_label_hover_states
+            .borrow_mut()
+            .entry(row.model_id.clone())
+            .or_default()
+            .clone();
+        let label_with_tooltip = appearance.ui_builder().overlay_tool_tip_on_element(
+            full_label,
+            hover_state,
+            label_row.finish(),
+            ParentAnchor::BottomLeft,
+            ChildAnchor::TopLeft,
+            vec2f(0., 4.),
+        );
+
+        // The label is wrapped in `Expanded`: a plain (non-flex) `Text` in a
+        // `Flex::row` sizes to its own intrinsic width regardless of the
+        // row's available space, so a long model name would push the
+        // trailing token/cost value and chevron off the edge of the popover
+        // instead of being ellipsis-clipped. `Expanded` bounds it to
+        // whatever space remains after its row-sibling (the swatch here).
         let left = Flex::row()
             .with_cross_axis_alignment(CrossAxisAlignment::Center)
             .with_spacing(7.)
-            .with_child(
-                ConstrainedBox::new(chevron_icon.to_warpui_icon(chevron_color.into()).finish())
-                    .with_width(10.)
-                    .with_height(10.)
-                    .finish(),
-            )
             .with_child(render_swatch(color))
-            .with_child(
-                Expanded::new(
-                    1.,
-                    Text::new(label, appearance.ui_font_family(), font_size)
-                        .with_color(blended_colors::text_main(theme, background))
-                        .soft_wrap(false)
-                        .with_clip(ClipConfig::ellipsis())
-                        .finish(),
-                )
-                .finish(),
-            );
+            .with_child(Expanded::new(1., label_with_tooltip).finish());
 
         let value = Text::new(
             format_tokens_and_cost(Some(row.tokens), row.cost_in_cents),
             appearance.ui_font_family(),
             font_size,
         )
-        .with_color(blended_colors::text_sub(theme, background))
+        .with_color(blended_colors::text_main(theme, background))
         .finish();
+        let chevron =
+            ConstrainedBox::new(chevron_icon.to_warpui_icon(chevron_color.into()).finish())
+                .with_width(10.)
+                .with_height(10.)
+                .finish();
+        let right = Flex::row()
+            .with_cross_axis_alignment(CrossAxisAlignment::Center)
+            .with_spacing(6.)
+            .with_child(value)
+            .with_child(chevron);
 
         let summary_row = space_between_row()
             .with_child(Expanded::new(1., left.finish()).finish())
-            .with_child(Container::new(value).with_margin_left(8.).finish())
+            .with_child(Container::new(right.finish()).with_margin_left(8.).finish())
             .finish();
 
         let mut column = Flex::column().with_spacing(6.).with_child(summary_row);
@@ -520,7 +574,7 @@ impl UsagePopoverView {
             let breakdown = match row.charged_usage {
                 Some(charged_usage) => render_charged_usage_breakdown(&charged_usage, appearance),
                 None => Text::new(
-                    "No detailed breakdown available yet".to_string(),
+                    "No detailed breakdown available".to_string(),
                     appearance.ui_font_family(),
                     font_size,
                 )
