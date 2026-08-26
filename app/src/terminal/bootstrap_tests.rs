@@ -255,3 +255,77 @@ printf 'widget=[%s] plugins=[%s]\n' "$_WARP_EXTERNAL_CTRL_T_WIDGET" "${{shell_pl
     assert!(stdout.contains("widget=[fzf-file-widget]"), "{stdout}");
     assert!(stdout.contains("external_ctrl_t_file"), "{stdout}");
 }
+
+fn fish_ctrl_t_widget_query_fn() -> &'static str {
+    const FISH_SH: &str = include_str!("../../assets/bundled/bootstrap/fish.sh");
+    let start_marker = "function warp_external_ctrl_t_widget\n  set -l widget \"\"\n  for binding in (bind \\ct 2>/dev/null)";
+    let end_marker = "  test -n \"$widget\"; or return 1\n  echo \"$widget\"\nend";
+    let start = FISH_SH
+        .find(start_marker)
+        .expect("fish ctrl-t widget query function start should exist");
+    let end = FISH_SH[start..]
+        .find(end_marker)
+        .expect("fish ctrl-t widget query function end should exist");
+    &FISH_SH[start..start + end + end_marker.len()]
+}
+
+fn fish_ctrl_t_detection_snippet() -> &'static str {
+    const FISH_SH: &str = include_str!("../../assets/bundled/bootstrap/fish.sh");
+    let start_marker = "set -g _WARP_EXTERNAL_CTRL_T_WIDGET \"\"\n  set -l warp_ctrl_t_widget (warp_external_ctrl_t_widget)\n  switch \"$warp_ctrl_t_widget\"";
+    let end_marker = "        set -a shell_plugins external_ctrl_t_file\n      end\n  end";
+    let start = FISH_SH
+        .find(start_marker)
+        .expect("fish ctrl-t detection snippet start should exist");
+    let end = FISH_SH[start..]
+        .find(end_marker)
+        .expect("fish ctrl-t detection snippet end should exist");
+    &FISH_SH[start..start + end + end_marker.len()]
+}
+
+/// Regression test for the fish equivalent of bash's picker-function guard: detection must
+/// decline (no tag, no interception) when `fzf-file-widget` -- the function
+/// `warp_run_external_ctrl_t_widget` now calls directly -- isn't actually defined, even though
+/// `bind` reports it as ctrl-t's binding. Without this guard, a rebind to a nonexistent or
+/// renamed function would have ctrl-t tagged and intercepted with nothing to invoke, swallowing
+/// the key instead of leaving it alone.
+#[test]
+fn test_fish_ctrl_t_detection_declines_when_picker_function_is_absent() {
+    let query_fn = fish_ctrl_t_widget_query_fn();
+    let detection = fish_ctrl_t_detection_snippet();
+    let script = format!(
+        r#"
+{query_fn}
+bind \ct fzf-file-widget
+set -l shell_plugins
+{detection}
+printf 'widget=[%s] plugins=[%s]\n' "$_WARP_EXTERNAL_CTRL_T_WIDGET" "$shell_plugins"
+"#
+    );
+    let Some(stdout) = run_fish(&script) else {
+        return;
+    };
+    assert!(stdout.contains("widget=[]"), "{stdout}");
+    assert!(!stdout.contains("external_ctrl_t_file"), "{stdout}");
+}
+
+#[test]
+fn test_fish_ctrl_t_detection_tags_when_picker_function_is_present() {
+    let query_fn = fish_ctrl_t_widget_query_fn();
+    let detection = fish_ctrl_t_detection_snippet();
+    let script = format!(
+        r#"
+{query_fn}
+function fzf-file-widget
+end
+bind \ct fzf-file-widget
+set -l shell_plugins
+{detection}
+printf 'widget=[%s] plugins=[%s]\n' "$_WARP_EXTERNAL_CTRL_T_WIDGET" "$shell_plugins"
+"#
+    );
+    let Some(stdout) = run_fish(&script) else {
+        return;
+    };
+    assert!(stdout.contains("widget=[fzf-file-widget]"), "{stdout}");
+    assert!(stdout.contains("external_ctrl_t_file"), "{stdout}");
+}

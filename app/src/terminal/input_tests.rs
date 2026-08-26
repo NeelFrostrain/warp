@@ -203,6 +203,7 @@ fn external_ctrl_t_selection_matching_session_and_token_is_applied() {
         cursor_offset: ByteOffset::from(5),
         insertion: None,
         block_id: BlockId::new(),
+        apply_mode: CtrlTApplyMode::Splice,
     });
     PendingCtrlTHandoff::maybe_apply_selection(
         &mut pending,
@@ -239,6 +240,7 @@ fn stale_external_ctrl_t_selection_with_mismatched_token_is_ignored() {
         cursor_offset: ByteOffset::from(5),
         insertion: None,
         block_id: BlockId::new(),
+        apply_mode: CtrlTApplyMode::Splice,
     });
     PendingCtrlTHandoff::maybe_apply_selection(
         &mut pending,
@@ -258,6 +260,7 @@ fn stale_external_ctrl_t_selection_with_mismatched_session_is_ignored() {
         cursor_offset: ByteOffset::from(5),
         insertion: None,
         block_id: BlockId::new(),
+        apply_mode: CtrlTApplyMode::Splice,
     });
     PendingCtrlTHandoff::maybe_apply_selection(
         &mut pending,
@@ -281,6 +284,7 @@ fn cancelled_external_ctrl_t_selection_with_empty_buffer_leaves_insertion_unset(
         cursor_offset: ByteOffset::from(5),
         insertion: None,
         block_id: BlockId::new(),
+        apply_mode: CtrlTApplyMode::Splice,
     });
     PendingCtrlTHandoff::maybe_apply_selection(&mut pending, SessionId::from(1), "tok-1", "");
     assert_eq!(pending.unwrap().insertion, None);
@@ -2021,10 +2025,11 @@ fn user_block_completed_for_test(command: &str) -> BlockType {
 
 /// Drives a completed ctrl-t handoff (see `Input::handle_block_completed_event`) directly,
 /// without going through the full trigger/selection flow: constructs the pending handoff with
-/// the given `original_buffer`/`cursor_offset`/`insertion`, then completes its block. Returns the
-/// resulting buffer text and the byte offset the cursor/selection ends up at.
-async fn splice_ctrl_t_handoff(
+/// the given `apply_mode`/`original_buffer`/`cursor_offset`/`insertion`, then completes its
+/// block. Returns the resulting buffer text and the byte offset the cursor/selection ends up at.
+async fn complete_ctrl_t_handoff(
     app: &mut App,
+    apply_mode: CtrlTApplyMode,
     original_buffer: &str,
     cursor_offset: usize,
     insertion: Option<&str>,
@@ -2040,6 +2045,7 @@ async fn splice_ctrl_t_handoff(
             cursor_offset: ByteOffset::from(cursor_offset),
             insertion: insertion.map(str::to_string),
             block_id: block_id.clone(),
+            apply_mode,
         });
         input.deferred_remote_operations.latest_block_id = BlockId::new();
         input.handle_block_completed_event(
@@ -2071,8 +2077,14 @@ fn ctrl_t_handoff_splices_selection_in_middle_of_line() {
         initialize_app(&mut app);
         // Cursor sits right after "echo START ", before "END": the insertion must land there
         // with both the preceding and following text preserved.
-        let (buffer, cursor) =
-            splice_ctrl_t_handoff(&mut app, "echo START END", 11, Some("FILE.txt ")).await;
+        let (buffer, cursor) = complete_ctrl_t_handoff(
+            &mut app,
+            CtrlTApplyMode::Splice,
+            "echo START END",
+            11,
+            Some("FILE.txt "),
+        )
+        .await;
         assert_eq!(buffer, "echo START FILE.txt END");
         assert_eq!(cursor, ByteOffset::from("echo START FILE.txt ".len()));
     });
@@ -2082,7 +2094,14 @@ fn ctrl_t_handoff_splices_selection_in_middle_of_line() {
 fn ctrl_t_handoff_splices_selection_at_end_of_line() {
     App::test((), |mut app| async move {
         initialize_app(&mut app);
-        let (buffer, cursor) = splice_ctrl_t_handoff(&mut app, "echo ", 5, Some("FILE.txt")).await;
+        let (buffer, cursor) = complete_ctrl_t_handoff(
+            &mut app,
+            CtrlTApplyMode::Splice,
+            "echo ",
+            5,
+            Some("FILE.txt"),
+        )
+        .await;
         assert_eq!(buffer, "echo FILE.txt");
         assert_eq!(cursor, ByteOffset::from("echo FILE.txt".len()));
     });
@@ -2092,7 +2111,9 @@ fn ctrl_t_handoff_splices_selection_at_end_of_line() {
 fn ctrl_t_handoff_splices_selection_into_empty_buffer() {
     App::test((), |mut app| async move {
         initialize_app(&mut app);
-        let (buffer, cursor) = splice_ctrl_t_handoff(&mut app, "", 0, Some("FILE.txt")).await;
+        let (buffer, cursor) =
+            complete_ctrl_t_handoff(&mut app, CtrlTApplyMode::Splice, "", 0, Some("FILE.txt"))
+                .await;
         assert_eq!(buffer, "FILE.txt");
         assert_eq!(cursor, ByteOffset::from("FILE.txt".len()));
     });
@@ -2107,8 +2128,14 @@ fn ctrl_t_handoff_splices_selection_after_multi_byte_character() {
         initialize_app(&mut app);
         let original = "caf\u{e9} ";
         let cursor_offset = original.len();
-        let (buffer, cursor) =
-            splice_ctrl_t_handoff(&mut app, original, cursor_offset, Some("dest.txt")).await;
+        let (buffer, cursor) = complete_ctrl_t_handoff(
+            &mut app,
+            CtrlTApplyMode::Splice,
+            original,
+            cursor_offset,
+            Some("dest.txt"),
+        )
+        .await;
         assert_eq!(buffer, "caf\u{e9} dest.txt");
         assert_eq!(cursor, ByteOffset::from("caf\u{e9} dest.txt".len()));
     });
@@ -2118,23 +2145,145 @@ fn ctrl_t_handoff_splices_selection_after_multi_byte_character() {
 /// offset it was captured at, not merely leave the surrounding text untouched. `set_buffer_text`
 /// alone would leave the cursor at the end of the restored text; only the explicit
 /// `select_ranges_by_byte_offset` call in the `None` arm of `Input::handle_block_completed_event`
-/// repositions it back to where ctrl-t was originally pressed.
+/// repositions it back to where ctrl-t was originally pressed. Covers both apply modes: cancel
+/// behaves identically regardless of which shell started the handoff.
 #[test]
 fn ctrl_t_handoff_cancel_restores_cursor_to_original_offset_mid_line() {
     App::test((), |mut app| async move {
         initialize_app(&mut app);
-        // Cursor originally sat right after "echo START ", before "END".
-        let (buffer, cursor) = splice_ctrl_t_handoff(&mut app, "echo START END", 11, None).await;
+        for apply_mode in [CtrlTApplyMode::Splice, CtrlTApplyMode::Replace] {
+            // Cursor originally sat right after "echo START ", before "END".
+            let (buffer, cursor) =
+                complete_ctrl_t_handoff(&mut app, apply_mode, "echo START END", 11, None).await;
+            assert_eq!(
+                buffer, "echo START END",
+                "{apply_mode:?}: cancelling must leave the original text untouched"
+            );
+            assert_eq!(
+                cursor,
+                ByteOffset::from(11),
+                "{apply_mode:?}: cancelling must restore the cursor to where ctrl-t was pressed, \
+                 not the end of the buffer"
+            );
+        }
+    });
+}
+
+/// fish's `fzf-file-widget` already performs its own token-aware replacement, so its selection
+/// (see `CtrlTApplyMode::Replace`) must land as the finished buffer wholesale -- not spliced into
+/// `original_buffer` the way bash/zsh's plain-path selection is. Using a `cursor_offset` that
+/// would splice into the *middle* of `original_buffer` if `Replace` were mishandled as `Splice`
+/// makes that distinction observable: a regression here would interleave `original_buffer` and
+/// `insertion` instead of replacing outright.
+#[test]
+fn ctrl_t_handoff_replace_mode_lands_selection_wholesale() {
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        let (buffer, cursor) = complete_ctrl_t_handoff(
+            &mut app,
+            CtrlTApplyMode::Replace,
+            "vim src/ END",
+            8,
+            Some("vim src/nested.rs "),
+        )
+        .await;
+        assert_eq!(buffer, "vim src/nested.rs ");
+        assert_eq!(cursor, ByteOffset::from("vim src/nested.rs ".len()));
+    });
+}
+
+/// States the `Splice`/`Replace` fork as an explicit contract: the same pre-handoff draft and
+/// cursor, completed with each shell's own realistic selection shape, must diverge exactly as
+/// each mode specifies. A regression that collapses the two modes together (e.g. always splicing,
+/// or always replacing) would fail one arm of this test while possibly leaving the other passing.
+#[test]
+fn ctrl_t_apply_mode_forks_between_splice_and_replace_for_the_same_draft() {
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+
+        // bash/zsh: the helper reports a plain path with no knowledge of the draft, so Warp
+        // splices it into the token at the captured cursor offset.
+        let (splice_buffer, splice_cursor) = complete_ctrl_t_handoff(
+            &mut app,
+            CtrlTApplyMode::Splice,
+            "vim src/ END",
+            8,
+            Some("nested.rs "),
+        )
+        .await;
+        assert_eq!(splice_buffer, "vim src/nested.rs  END");
+        assert_eq!(splice_cursor, ByteOffset::from("vim src/nested.rs ".len()));
+
+        // fish: fzf-file-widget already replaced the token itself, so its report is the whole
+        // finished line, landed wholesale.
+        let (replace_buffer, replace_cursor) = complete_ctrl_t_handoff(
+            &mut app,
+            CtrlTApplyMode::Replace,
+            "vim src/ END",
+            8,
+            Some("vim src/nested.rs  END"),
+        )
+        .await;
+        assert_eq!(replace_buffer, "vim src/nested.rs  END");
         assert_eq!(
-            buffer, "echo START END",
-            "cancelling must leave the original text untouched"
-        );
-        assert_eq!(
-            cursor,
-            ByteOffset::from(11),
-            "cancelling must restore the cursor to where ctrl-t was pressed, not the end of the buffer"
+            replace_cursor,
+            ByteOffset::from("vim src/nested.rs  END".len())
         );
     });
+}
+
+/// The fish ctrl-t helper reads the draft's cursor with fish's `commandline -C`, which takes a
+/// *character* offset, while `cursor_offset` here is a byte offset -- so a draft containing a
+/// multi-byte character before the cursor (here, "caf\u{e9} ", where \u{e9} is 2 bytes but 1
+/// character, for 6 bytes and 5 characters total) must have that byte offset converted, not
+/// copied verbatim, or the widget would seed itself at the wrong position for any non-ASCII draft.
+#[test]
+fn write_ctrl_t_draft_file_converts_byte_cursor_to_char_cursor_for_multi_byte_draft() {
+    let original_buffer = "caf\u{e9} ls";
+    // Byte offset right after "café " (the \u{e9} is 2 bytes), which is character offset 5.
+    let cursor_offset = ByteOffset::from("caf\u{e9} ".len());
+    let token = format!("test-{}", Uuid::new_v4());
+    write_ctrl_t_draft_file(&token, original_buffer, cursor_offset)
+        .expect("draft file should be writable in a test environment");
+    let path = ctrl_t_draft_file_path(&token);
+    let contents = std::fs::read_to_string(&path).expect("draft file should have been written");
+    std::fs::remove_file(&path).ok();
+
+    let mut lines = contents.splitn(2, '\n');
+    assert_eq!(
+        lines.next(),
+        Some("5"),
+        "the cursor must be written as a character offset, not the byte offset"
+    );
+    assert_eq!(
+        lines.next(),
+        Some(original_buffer),
+        "the draft line must be written verbatim"
+    );
+}
+
+/// The draft file may hold an in-progress command line the user hasn't run yet, so it must never
+/// be readable by another local user, even for the instant between creation and its first write.
+#[cfg(unix)]
+#[test]
+fn write_ctrl_t_draft_file_is_created_with_owner_only_permissions() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let token = format!("test-{}", Uuid::new_v4());
+    write_ctrl_t_draft_file(&token, "echo hi", ByteOffset::from(7))
+        .expect("draft file should be writable in a test environment");
+    let path = ctrl_t_draft_file_path(&token);
+    let mode = std::fs::metadata(&path)
+        .expect("draft file should have been written")
+        .permissions()
+        .mode();
+    std::fs::remove_file(&path).ok();
+
+    assert_eq!(
+        mode & 0o777,
+        0o600,
+        "the draft file must be owner-only (0600) from the moment it exists"
+    );
 }
 
 /// While `ShellWidgetHandoff` is disabled (its default state, matching a user who hasn't opted

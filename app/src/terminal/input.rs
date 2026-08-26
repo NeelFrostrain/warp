@@ -1829,6 +1829,19 @@ impl PendingCtrlRHandoff {
     }
 }
 
+/// How a completed ctrl-t handoff's selection is landed into the editor buffer (see
+/// [`Input::trigger_external_ctrl_t_file_search`]). Chosen at trigger time from the session's
+/// shell type: fish's `fzf-file-widget` is invoked directly and already performs its own
+/// token-aware replacement, so it returns the whole new line rather than a fragment to splice in
+/// at a fixed offset the way bash/zsh's plain-path selection does.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CtrlTApplyMode {
+    /// Insert the selection into `original_buffer` at `cursor_offset` (bash, zsh).
+    Splice,
+    /// Replace the buffer wholesale with the selection (fish).
+    Replace,
+}
+
 /// State for an in-flight external ctrl-t handoff (see
 /// [`Input::trigger_external_ctrl_t_file_search`]). Unlike ctrl-r, which replaces the entire
 /// buffer with the selection, ctrl-t inserts the selection into the buffer the user had before
@@ -1848,6 +1861,8 @@ struct PendingCtrlTHandoff {
     /// The block running the synthetic helper command. Hidden once it completes (see
     /// [`Input::handle_block_completed_event`]) so it doesn't clutter scrollback.
     block_id: BlockId,
+    /// How `insertion` should be landed into the buffer once it arrives; see [`CtrlTApplyMode`].
+    apply_mode: CtrlTApplyMode,
 }
 
 impl PendingCtrlTHandoff {
@@ -1871,6 +1886,57 @@ impl PendingCtrlTHandoff {
             handoff.insertion = Some(selection.to_string());
         }
     }
+}
+
+/// Directory the ctrl-t draft handoff file (see [`write_ctrl_t_draft_file`]) is written into:
+/// `$XDG_RUNTIME_DIR` when set, since it's the per-user, non-persistent directory most Linux
+/// distros provide; `/tmp` otherwise. Must match the fallback the fish helper computes for itself
+/// from its own environment -- see `warp_run_external_ctrl_t_widget` in `fish.sh`.
+fn ctrl_t_draft_file_dir() -> PathBuf {
+    std::env::var_os("XDG_RUNTIME_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("/tmp"))
+}
+
+/// Path of the ctrl-t draft handoff file for `token` (see [`write_ctrl_t_draft_file`]).
+fn ctrl_t_draft_file_path(token: &str) -> PathBuf {
+    ctrl_t_draft_file_dir().join(format!("warp-ctrl-t-{token}"))
+}
+
+/// Writes the draft line and cursor the fish ctrl-t helper seeds `fzf-file-widget` with (see
+/// [`CtrlTApplyMode::Replace`]), so its token-aware replacement operates on the real in-progress
+/// command rather than an empty line. Bash/zsh never call this: their helper searches
+/// independently of the draft and reports a plain path for Warp to splice in itself.
+///
+/// Created with owner-only (0600) permissions from the moment the file exists -- this may contain
+/// in-progress command text the user hasn't run yet, and creating the file before restricting its
+/// permissions would leave a window where another local user could read it. The first line is
+/// `cursor_offset` converted to a character offset, since fish's `commandline -C` takes
+/// characters while `cursor_offset` is a byte offset; the remainder of the file is
+/// `original_buffer` verbatim.
+fn write_ctrl_t_draft_file(
+    token: &str,
+    original_buffer: &str,
+    cursor_offset: ByteOffset,
+) -> anyhow::Result<()> {
+    use std::io::Write as _;
+    #[cfg(unix)]
+    use std::os::unix::fs::OpenOptionsExt as _;
+
+    use anyhow::Context as _;
+
+    let char_cursor = original_buffer[..cursor_offset.as_usize()].chars().count();
+    let path = ctrl_t_draft_file_path(token);
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    options.mode(0o600);
+    let mut file = options
+        .open(&path)
+        .with_context(|| format!("failed to create {}", path.display()))?;
+    writeln!(file, "{char_cursor}")?;
+    file.write_all(original_buffer.as_bytes())?;
+    Ok(())
 }
 
 struct AmbientAgentViewState {
@@ -7664,16 +7730,24 @@ impl Input {
 
     /// Runs `helper_command` (a bootstrap-installed shell function) as if the user had typed and
     /// submitted it, mirroring [`Self::trigger_external_ctrl_r_history_search`]. Unlike ctrl-r,
-    /// which replaces the whole buffer with the selection, ctrl-t inserts the selection into the
-    /// buffer at the cursor position ctrl-t was pressed at -- so this snapshots the current
-    /// buffer text and cursor byte offset separately, rather than a single restorable string.
-    /// Returns `true` if the command was started.
+    /// which replaces the whole buffer with the selection, ctrl-t either splices the selection
+    /// into the buffer at the cursor position ctrl-t was pressed at, or replaces the buffer
+    /// wholesale, depending on `apply_mode` (see [`CtrlTApplyMode`]) -- so this snapshots the
+    /// current buffer text and cursor byte offset separately, rather than a single restorable
+    /// string. Returns `true` if the command was started.
     ///
     /// See [`Self::trigger_external_ctrl_r_history_search`] for why the command is prefixed with
     /// a leading space.
+    ///
+    /// When `apply_mode` is [`CtrlTApplyMode::Replace`], also writes the draft handoff file (see
+    /// [`write_ctrl_t_draft_file`]) the fish helper reads to seed its widget with the real draft
+    /// line and cursor; a failure to write it aborts the trigger entirely; bash/zsh never need
+    /// this file, since their helper searches independently of the draft and reports a plain path
+    /// for Warp to splice in itself.
     pub fn trigger_external_ctrl_t_file_search(
         &mut self,
         helper_command: &str,
+        apply_mode: CtrlTApplyMode,
         ctx: &mut ViewContext<Self>,
     ) -> bool {
         let Some(session_id) = self.active_block_session_id() else {
@@ -7686,6 +7760,12 @@ impl Input {
             .end_byte_index_of_last_selection(ctx);
         let block_id = self.model.lock().block_list().active_block_id().clone();
         let token = Uuid::new_v4().to_string();
+        if apply_mode == CtrlTApplyMode::Replace
+            && let Err(error) = write_ctrl_t_draft_file(&token, &original_buffer, cursor_offset)
+        {
+            report_error!(error.context("failed to write ctrl-t draft handoff file"));
+            return false;
+        }
         let command = format!(" {helper_command} {token}");
         let started =
             self.try_execute_command_from_source(&command, CommandExecutionSource::User, ctx);
@@ -7697,7 +7777,11 @@ impl Input {
                 cursor_offset,
                 insertion: None,
                 block_id,
+                apply_mode,
             });
+        } else if apply_mode == CtrlTApplyMode::Replace {
+            // The helper never ran, so it will never clean up the draft file it would have read.
+            let _ = std::fs::remove_file(ctrl_t_draft_file_path(&token));
         }
         started
     }
@@ -15484,9 +15568,16 @@ impl Input {
                 .take()
                 .or_else(|| completed_ctrl_r_handoff.map(|handoff| handoff.restore_text))
                 .or_else(|| {
-                    completed_ctrl_t_handoff
-                        .as_ref()
-                        .map(|handoff| handoff.original_buffer.clone())
+                    completed_ctrl_t_handoff.as_ref().map(|handoff| {
+                        // In `Replace` mode the shell's own widget already performed the
+                        // token-aware replacement, so its selection *is* the finished buffer;
+                        // landing it as the base text (rather than `original_buffer`, then
+                        // splicing) avoids reconstructing what the widget already built.
+                        match (handoff.apply_mode, &handoff.insertion) {
+                            (CtrlTApplyMode::Replace, Some(insertion)) => insertion.clone(),
+                            _ => handoff.original_buffer.clone(),
+                        }
+                    })
                 });
 
             if should_clear_buffer {
@@ -15505,21 +15596,27 @@ impl Input {
                         self.editor.update(ctx, |editor, ctx| {
                             editor.set_buffer_text(&restore_text, ctx);
                             // A ctrl-t handoff restores the pre-handoff buffer above, then (unlike
-                            // ctrl-r) splices its selection in at the captured cursor offset
-                            // instead of replacing the whole buffer, or just moves the cursor back
-                            // to that offset if the user cancelled without selecting anything.
+                            // ctrl-r) either splices its selection in at the captured cursor
+                            // offset, or -- for `Replace` mode -- leaves the already-finished
+                            // buffer set above as-is, since the widget placed its own cursor
+                            // position and there is nothing left to splice. Either mode instead
+                            // moves the cursor back to the captured offset on cancel.
                             if let Some(handoff) = &completed_ctrl_t_handoff {
-                                match &handoff.insertion {
-                                    Some(insertion) => editor.select_and_replace(
-                                        insertion,
-                                        [handoff.cursor_offset..handoff.cursor_offset],
-                                        PlainTextEditorViewAction::InsertSelectedText,
-                                        ctx,
-                                    ),
-                                    None => editor.select_ranges_by_byte_offset(
-                                        [handoff.cursor_offset..handoff.cursor_offset],
-                                        ctx,
-                                    ),
+                                match (handoff.apply_mode, &handoff.insertion) {
+                                    (CtrlTApplyMode::Splice, Some(insertion)) => editor
+                                        .select_and_replace(
+                                            insertion,
+                                            [handoff.cursor_offset..handoff.cursor_offset],
+                                            PlainTextEditorViewAction::InsertSelectedText,
+                                            ctx,
+                                        ),
+                                    (CtrlTApplyMode::Replace, Some(_)) => {}
+                                    (CtrlTApplyMode::Splice | CtrlTApplyMode::Replace, None) => {
+                                        editor.select_ranges_by_byte_offset(
+                                            [handoff.cursor_offset..handoff.cursor_offset],
+                                            ctx,
+                                        )
+                                    }
                                 }
                             }
                         });

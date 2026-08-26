@@ -608,6 +608,16 @@ function warp_run_external_ctrl_r_widget
   warp_send_json_message "{ \"hook\": \"ExternalCtrlRSelection\", \"value\": { \"buffer\": \"$warp_escaped_selection\", \"token\": \"$warp_escaped_token\", \"session_id\": $WARP_SESSION_ID } }"
 end
 
+# Locates the draft handoff file Warp writes just before typing this helper's invocation into the
+# terminal (see Input::write_ctrl_t_draft_file), identified by the handoff token given as
+# $argv[1]. $XDG_RUNTIME_DIR must mirror the fallback Warp's own write uses, or this looks in the
+# wrong place for a file Warp actually wrote elsewhere.
+function warp_ctrl_t_draft_file_path
+  set -l dir "$XDG_RUNTIME_DIR"
+  test -n "$dir"; or set dir /tmp
+  echo "$dir/warp-ctrl-t-$argv[1]"
+end
+
 # Runs fzf directly against a find-style command as a synthetic foreground command, mirroring
 # warp_run_external_ctrl_r_widget above. Reports the selected path(s) (or an empty buffer, if
 # cancelled) via the ExternalCtrlTSelection hook so Warp can insert them into the input editor at
@@ -615,26 +625,49 @@ end
 # back unchanged, so Warp can confirm the hook is the reply to the handoff it started rather than
 # an unrelated write to the pty.
 #
-# Unlike bash/zsh, fish's fzf integration has no picker function separable from its bound
-# fzf-file-widget: that function inline-parses the current commandline token into a search root,
-# a seed query, and an option prefix (see fzf's own __fzf_parse_commandline), then replaces just
-# that token with the selection. Warp deliberately doesn't reproduce that parsing -- it always
-# searches from $PWD with no seed query and lands the plain selection at the cursor, the same
-# simpler behavior bash/zsh already have (see PR description for the resulting difference).
+# Unlike warp_run_external_ctrl_r_widget above, this calls the user's own bound fzf-file-widget
+# directly rather than re-running fzf against an independent search command: that function is
+# token-aware (it parses the current commandline token into a search root, a seed query, and an
+# option prefix -- see fzf's own __fzf_parse_commandline -- then replaces just that token), and
+# reproducing that parsing by hand would either drop it or duplicate it badly. Calling a fish
+# function directly (rather than queuing it as a bound key with `commandline -f`, which would
+# defer its effect to the next prompt read instead of running it now) blocks until the picker
+# exits, unlike zle/bash's bind machinery, which is why this differs from the ctrl-r widget above.
+#
+# Since fzf-file-widget itself reads and writes the commandline, it needs the real draft line and
+# cursor to do anything useful with -- which can't be passed as this helper's own argument (argv
+# is visible to any local process via /proc) or embedded in the command Warp types (which would
+# land it in scrollback). So Warp writes it to the file warp_ctrl_t_draft_file_path locates,
+# owner-only (0600) so no other local user can read an in-progress command line, and this seeds
+# the widget with it via commandline -r/-C before calling it, then clears the line again
+# afterwards: since the widget already performed its own token-aware replacement, Warp takes the
+# reported result as the finished buffer wholesale rather than splicing a fragment into the
+# pre-handoff draft the way bash/zsh's plain-path report requires (see CtrlTApplyMode::Replace);
+# leaving the widget's own edit on the commandline would otherwise queue it for execution.
+# The draft file is removed on every exit from this branch, including a missing file and a
+# cancelled picker, since nothing else will ever clean it up.
 function warp_run_external_ctrl_t_widget
   set -l warp_ctrl_t_token "$argv[1]"
   set -l result ""
   switch "$_WARP_EXTERNAL_CTRL_T_WIDGET"
     case 'fzf-file-widget'
-      set -lx FZF_DEFAULT_OPTS (__fzf_defaults \
-        "--reverse --walker=file,dir,follow,hidden --scheme=path" \
-        "--multi $FZF_CTRL_T_OPTS --print0")
-      set -lx FZF_DEFAULT_COMMAND "$FZF_CTRL_T_COMMAND"
-      set -lx FZF_DEFAULT_OPTS_FILE
-      set -l selected
-      if set selected (eval (__fzfcmd) | string split0)
-        set result (string join ' ' (string escape -n -- $selected))' '
+      set -l draft_file (warp_ctrl_t_draft_file_path "$warp_ctrl_t_token")
+      set -l original_line ''
+      set -l char_cursor 0
+      if test -f "$draft_file"
+        set -l draft_contents (command cat -- "$draft_file")
+        set char_cursor $draft_contents[1]
+        # The remaining lines are the draft verbatim: rejoining with the same separator the
+        # command-substitution split on above losslessly reconstructs it, embedded newlines
+        # included, since the file has no trailing newline for fish to have dropped.
+        set original_line (string join \n -- $draft_contents[2..])
       end
+      commandline -r -- $original_line
+      commandline -C -- $char_cursor
+      fzf-file-widget
+      set result (commandline)
+      commandline -r ''
+      rm -f "$draft_file"
   end
   set -l warp_escaped_selection (warp_escape_json "$result")
   set -l warp_escaped_token (warp_escape_json "$warp_ctrl_t_token")
@@ -715,14 +748,13 @@ function warp_bootstrapped
   set -l warp_ctrl_t_widget (warp_external_ctrl_t_widget)
   switch "$warp_ctrl_t_widget"
     case 'fzf-file-widget'
-      # warp_run_external_ctrl_t_widget calls fzf's own __fzf_defaults/__fzfcmd helpers rather
-      # than reproducing their option-merging logic; older fzf's fish integration (still
-      # packaged by several distros) binds the same "fzf-file-widget" key but has no
-      # __fzf_defaults function at all (it builds FZF_DEFAULT_OPTS inline instead). Only
-      # tag/intercept when both helpers actually exist, so a version mismatch here can never
-      # claim ctrl-t and then have warp_run_external_ctrl_t_widget find nothing to call --
-      # that would swallow the key with no picker shown instead of leaving ctrl-t alone.
-      if functions -q __fzf_defaults; and functions -q __fzfcmd
+      # warp_run_external_ctrl_t_widget calls fzf-file-widget directly, so the only real
+      # requirement is that the function itself exists. `bind` already reported this name as
+      # ctrl-t's binding, but only tag/intercept once that's confirmed callable, so a rebind to a
+      # nonexistent or renamed function can never claim ctrl-t and then have
+      # warp_run_external_ctrl_t_widget find nothing to call -- that would swallow the key with
+      # no picker shown instead of leaving ctrl-t alone.
+      if functions -q fzf-file-widget
         set -g _WARP_EXTERNAL_CTRL_T_WIDGET "$warp_ctrl_t_widget"
         set -a shell_plugins external_ctrl_t_file
       end
