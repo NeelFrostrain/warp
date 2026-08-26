@@ -551,9 +551,19 @@ end
 # The handoff token given as $argv[1] is echoed back unchanged, so Warp can confirm the hook is
 # the reply to the handoff it started rather than an unrelated write to the pty.
 #
-# We re-run each tool's own underlying picker rather than invoking its bound fish function: those
-# functions write the selection into fish's line buffer with `commandline`, which would leave the
-# text queued for execution in the shell rather than handing it to Warp's editor.
+# For fzf, this calls the user's own bound fzf-history-widget directly (mirroring
+# warp_run_external_ctrl_t_widget's fzf-file-widget call below) rather than hand-rebuilding its
+# fzf invocation: fzf's own shell integration changes its available CLI flags and internal helper
+# functions across versions, and a hand-built invocation here previously broke outright on a
+# packaged fzf whose shell integration both lacked the `__fzf_defaults` helper it called and
+# rejected several of the flags it passed (`--wrap-sign`, `--highlight-line`, `--accept-nth`,
+# `--with-shell` are all absent from that version's own `fzf --help`) -- a version-compatibility
+# liability fzf-history-widget itself doesn't have, since it ships with the fzf release it
+# targets. fzf-history-widget replaces the whole commandline with its result, matching ctrl-r's
+# own "replace the whole input line" semantics exactly, and reads back as empty on cancel (it
+# only calls `commandline` on a successful selection); clearing the commandline afterward, as
+# warp_run_external_ctrl_t_widget's fzf-file-widget call already does, prevents its selection from
+# being queued for execution.
 #
 # $_WARP_EXTERNAL_CTRL_R_WIDGET is set during bootstrap (see warp_bootstrapped) to an exact
 # allowlist of each integration's canonical widget name -- not merely a name containing "fzf" or
@@ -565,29 +575,10 @@ function warp_run_external_ctrl_r_widget
   set -l result ""
   switch "$_WARP_EXTERNAL_CTRL_R_WIDGET"
     case 'fzf-history-widget'
-      # fzf's fish integration reads history through the shell rather than a history file, so
-      # this mirrors the pipeline fzf-history-widget builds, minus its `commandline` calls.
-      set -lx FZF_DEFAULT_OPTS (__fzf_defaults '' \
-        '--nth=2..,.. --scheme=history --wrap-sign="\t↳ "' \
-        "--bind=ctrl-r:toggle-sort --highlight-line $FZF_CTRL_R_OPTS" \
-        '--accept-nth=2.. --read0 --print0 --with-shell='(status fish-path)\\ -c)
-      set -lx FZF_DEFAULT_OPTS_FILE
-      set -lx FZF_DEFAULT_COMMAND
-      if type -q perl
-        set -a FZF_DEFAULT_OPTS '--tac'
-        set FZF_DEFAULT_COMMAND 'builtin history -z --reverse | command perl -0 -pe \'s/^/$.\t/g; s/\n/\n\t/gm\''
-      else
-        set FZF_DEFAULT_COMMAND \
-          'set -l h (builtin history -z --reverse | string split0);' \
-          'for i in (seq (count $h) -1 1);' \
-          'string join0 -- $i\t(string replace -a -- \n \n\t $h[$i] | string collect);' \
-          'end'
-      end
       test -z "$fish_private_mode"; and builtin history merge
-      set -l selected
-      if set selected (eval $FZF_DEFAULT_COMMAND \| (__fzfcmd) | string split0)
-        set result (string replace -a -- \n\t \n $selected[1])
-      end
+      fzf-history-widget
+      set result (commandline)
+      commandline -r ''
     case '_atuin_search'
       # atuin writes its TUI to stdout and the selection to fd 3, so the two are swapped here to
       # leave the UI on the terminal and capture only the selection.

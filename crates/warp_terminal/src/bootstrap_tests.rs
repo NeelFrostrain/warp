@@ -256,6 +256,84 @@ printf 'widget=[%s] plugins=[%s]\n' "$_WARP_EXTERNAL_CTRL_T_WIDGET" "${{shell_pl
     assert!(stdout.contains("external_ctrl_t_file"), "{stdout}");
 }
 
+fn fish_ctrl_r_widget_runner_fn() -> &'static str {
+    const FISH_SH: &str = include_str!("../../../app/assets/bundled/bootstrap/fish.sh");
+    let start_marker = "function warp_run_external_ctrl_r_widget\n";
+    let start = FISH_SH
+        .find(start_marker)
+        .expect("fish ctrl-r widget runner function start should exist");
+    let end_marker = "\nend\n";
+    let end = FISH_SH[start..]
+        .find(end_marker)
+        .expect("fish ctrl-r widget runner function end should exist");
+    &FISH_SH[start..start + end + end_marker.len()]
+}
+
+/// Regression test for `warp_run_external_ctrl_r_widget`'s fzf case: it used to hand-build
+/// `FZF_DEFAULT_OPTS` with flags (`--wrap-sign`, `--highlight-line`, `--accept-nth`,
+/// `--with-shell`) and call a helper function (`__fzf_defaults`) that don't exist on every fzf
+/// shell integration -- confirmed to fail outright with "Unknown command: __fzf_defaults" against
+/// a real, still-commonly-packaged fzf 0.44.1 install, with the picker that did appear (fzf
+/// falling through to a plain invocation once that command failed) reading raw, unformatted
+/// history text as its input. It now delegates entirely to the user's own `fzf-history-widget`
+/// instead, so this stubs that widget and the interactive-only `commandline` builtin they both
+/// call, to verify the wrapper reports whatever the widget leaves on the commandline without
+/// depending on any fzf-version-specific option or helper function existing at all -- the kind of
+/// test that would have caught the original defect, rather than merely asserting one flag absent.
+fn fish_ctrl_r_widget_test_script(runner: &str, widget_body: &str) -> String {
+    format!(
+        r#"
+function warp_escape_json
+  string join \n $argv
+end
+function warp_send_json_message
+  echo "$argv"
+end
+set -g _test_commandline_value ''
+function commandline
+  echo "$_test_commandline_value"
+end
+function fzf-history-widget
+  {widget_body}
+end
+set -g _WARP_EXTERNAL_CTRL_R_WIDGET fzf-history-widget
+set -g WARP_SESSION_ID 12345
+{runner}
+warp_run_external_ctrl_r_widget test-token
+"#
+    )
+}
+
+#[test]
+fn test_fish_ctrl_r_widget_reports_fzf_history_widget_selection() {
+    let runner = fish_ctrl_r_widget_runner_fn();
+    let script = fish_ctrl_r_widget_test_script(
+        runner,
+        "set -g _test_commandline_value 'echo selected_from_widget'",
+    );
+    let Some(stdout) = run_fish(&script) else {
+        return;
+    };
+    assert!(
+        stdout.contains(r#""buffer": "echo selected_from_widget""#),
+        "{stdout}"
+    );
+}
+
+/// `fzf-history-widget` only calls `commandline` on a successful selection, leaving it untouched
+/// on cancel -- the wrapper must report that untouched (here: still-empty) state as an empty
+/// buffer, matching the existing "nothing selected" convention shared with the plain-path bash/
+/// zsh widgets.
+#[test]
+fn test_fish_ctrl_r_widget_reports_empty_buffer_when_widget_leaves_commandline_untouched() {
+    let runner = fish_ctrl_r_widget_runner_fn();
+    let script = fish_ctrl_r_widget_test_script(runner, "# cancelled: commandline left as-is");
+    let Some(stdout) = run_fish(&script) else {
+        return;
+    };
+    assert!(stdout.contains(r#""buffer": """#), "{stdout}");
+}
+
 fn fish_ctrl_t_widget_query_fn() -> &'static str {
     const FISH_SH: &str = include_str!("../../../app/assets/bundled/bootstrap/fish.sh");
     let start_marker = "function warp_external_ctrl_t_widget\n  set -l widget \"\"\n  for binding in (bind \\ct 2>/dev/null)";
