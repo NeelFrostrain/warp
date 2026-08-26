@@ -201,62 +201,17 @@ impl UsagePopoverView {
             .finish()
     }
 
-    /// "Total Usage" summary row shown above the model/agent usage
-    /// section, using the orchestration rollup total when one applies.
-    fn render_total_usage_row(
-        &self,
-        conversation: &AIConversation,
-        rollup: Option<&OrchestrationCreditRollup>,
-        appearance: &Appearance,
-    ) -> Box<dyn Element> {
-        let theme = appearance.theme();
-        let background = theme.surface_2();
-        let font_size = appearance.ui_font_size();
-
-        let (total_tokens, cost_in_cents) = match rollup {
-            Some(rollup) => (
-                rollup.total_tokens.map(u64::from),
-                rollup.total_cost_in_cents,
-            ),
-            None => {
-                let total_tokens: u64 = conversation
-                    .token_usage()
-                    .iter()
-                    .map(|model| {
-                        (model.warp_tokens + model.byok_tokens + model.custom_endpoint_tokens)
-                            as u64
-                    })
-                    .sum();
-                (
-                    Some(total_tokens),
-                    conversation.usage_totals().cost_in_cents,
-                )
-            }
-        };
-        let value_text = format_tokens_and_cost(total_tokens, cost_in_cents);
-
-        space_between_row()
-            .with_child(
-                Text::new(
-                    "Total Usage".to_string(),
-                    appearance.ui_font_family(),
-                    font_size,
-                )
-                .with_color(blended_colors::text_sub(theme, background))
-                .finish(),
-            )
-            .with_child(
-                Text::new(value_text, appearance.ui_font_family(), font_size)
-                    .with_color(blended_colors::text_main(theme, background))
-                    .finish(),
-            )
-            .finish()
-    }
-
+    /// Renders a collapsible section header: an overline `label` on the
+    /// left and, on the right, a chevron indicating expand state. When the
+    /// section is collapsed and `collapsed_summary` is provided, that
+    /// summary text (e.g. "144.3k tokens / $0.21", "12 tool calls") is
+    /// shown just before the chevron, so key information stays visible
+    /// without expanding the section.
     fn render_section_header(
         &self,
         label: &str,
         expanded: bool,
+        collapsed_summary: Option<String>,
         mouse_state: MouseStateHandle,
         action: UsagePopoverAction,
         appearance: &Appearance,
@@ -264,6 +219,7 @@ impl UsagePopoverView {
         let theme = appearance.theme();
         let background = theme.surface_2();
         let label_color = blended_colors::text_disabled(theme, background);
+        let summary_color = blended_colors::text_sub(theme, background);
         let icon = if expanded {
             Icon::ChevronDown
         } else {
@@ -274,6 +230,8 @@ impl UsagePopoverView {
         // A couple points larger than the raw overline size so the section
         // headers read more clearly against the row content below them.
         let overline_font_size = appearance.overline_font_size() + 2.;
+        let summary_font_family = appearance.ui_font_family();
+        let summary_font_size = appearance.ui_font_size();
 
         Hoverable::new(mouse_state, move |_state| {
             let label_element = Text::new(label.clone(), overline_font_family, overline_font_size)
@@ -284,9 +242,20 @@ impl UsagePopoverView {
                     .with_width(overline_font_size)
                     .with_height(overline_font_size)
                     .finish();
+            let mut right = Flex::row()
+                .with_cross_axis_alignment(CrossAxisAlignment::Center)
+                .with_spacing(6.);
+            if !expanded && let Some(summary) = &collapsed_summary {
+                right.add_child(
+                    Text::new(summary.clone(), summary_font_family, summary_font_size)
+                        .with_color(summary_color)
+                        .finish(),
+                );
+            }
+            right.add_child(icon_element);
             space_between_row()
                 .with_child(label_element)
-                .with_child(icon_element)
+                .with_child(right.finish())
                 .finish()
         })
         .with_cursor(Cursor::PointingHand)
@@ -296,20 +265,47 @@ impl UsagePopoverView {
         .finish()
     }
 
+    /// Renders a non-collapsible section header: an overline `label` with
+    /// no chevron and no click handling, for sections (e.g. Platform Usage)
+    /// that have no expand/collapse state.
+    fn render_static_section_header(
+        &self,
+        label: &str,
+        appearance: &Appearance,
+    ) -> Box<dyn Element> {
+        let theme = appearance.theme();
+        let background = theme.surface_2();
+        let label_color = blended_colors::text_disabled(theme, background);
+        Text::new(
+            label.to_string(),
+            appearance.overline_font_family(),
+            appearance.overline_font_size() + 2.,
+        )
+        .with_color(label_color)
+        .finish()
+    }
+
     /// Renders either the per-model breakdown (default) or, when an
     /// orchestration rollup applies, the per-agent breakdown in its place
-    /// (Surface 6 resolved decision 2).
+    /// (Surface 6 resolved decision 2). The section header's collapsed
+    /// summary carries the conversation- (or rollup-) wide total usage
+    /// figure, replacing what used to be a standalone "Total Usage" row
+    /// above this section.
     fn render_usage_breakdown_section(
         &self,
         conversation: &AIConversation,
         rollup: Option<&OrchestrationCreditRollup>,
         appearance: &Appearance,
     ) -> Box<dyn Element> {
+        let (total_tokens, total_cost_in_cents) = total_usage_tokens_and_cost(conversation, rollup);
+        let collapsed_summary = format_tokens_and_cost(total_tokens, total_cost_in_cents);
+
         let mut column = Flex::column().with_spacing(8.);
         if let Some(rollup) = rollup {
             column.add_child(self.render_section_header(
                 "AGENT USAGE",
                 self.model_usage_section_expanded,
+                Some(collapsed_summary),
                 self.model_usage_toggle_mouse_state.clone(),
                 UsagePopoverAction::ToggleModelUsageSection,
                 appearance,
@@ -319,8 +315,9 @@ impl UsagePopoverView {
             }
         } else {
             column.add_child(self.render_section_header(
-                "MODEL USAGE",
+                "INFERENCE USAGE",
                 self.model_usage_section_expanded,
+                Some(collapsed_summary),
                 self.model_usage_toggle_mouse_state.clone(),
                 UsagePopoverAction::ToggleModelUsageSection,
                 appearance,
@@ -329,6 +326,31 @@ impl UsagePopoverView {
                 column.add_child(self.render_model_usage_rows(conversation, appearance));
             }
         }
+        column.finish()
+    }
+
+    /// Renders the non-collapsible "PLATFORM USAGE" section: Warp's
+    /// platform fee (infrastructure/orchestration overhead), which unlike
+    /// inference cost isn't attributable to any single model, so it's
+    /// broken out into its own always-visible section rather than folded
+    /// into the inference usage breakdown.
+    fn render_platform_usage_section(
+        &self,
+        conversation: &AIConversation,
+        appearance: &Appearance,
+    ) -> Box<dyn Element> {
+        let platform_cost_in_cents = conversation
+            .usage_totals()
+            .charged_usage
+            .map(|charged_usage| charged_usage.platform_cost_in_cents);
+
+        let mut column = Flex::column().with_spacing(8.);
+        column.add_child(self.render_static_section_header("PLATFORM USAGE", appearance));
+        column.add_child(render_label_value_row(
+            "Platform fee",
+            format_cost_only(platform_cost_in_cents),
+            appearance,
+        ));
         column.finish()
     }
 
@@ -655,6 +677,7 @@ impl UsagePopoverView {
         column.add_child(self.render_section_header(
             "TOOL CALL SUMMARY",
             self.tool_call_summary_section_expanded,
+            Some(format!("{} tool calls", tool_usage.total_tool_calls())),
             self.tool_call_summary_toggle_mouse_state.clone(),
             UsagePopoverAction::ToggleToolCallSummarySection,
             appearance,
@@ -704,6 +727,7 @@ impl UsagePopoverView {
         column.add_child(self.render_section_header(
             "RESPONSE TIME",
             self.response_time_section_expanded,
+            Some(format!("{:.1}s", response_ms as f64 / 1000.)),
             self.response_time_toggle_mouse_state.clone(),
             UsagePopoverAction::ToggleResponseTimeSection,
             appearance,
@@ -753,12 +777,12 @@ impl View for UsagePopoverView {
 
         let mut column = Flex::column().with_spacing(12.);
         column.add_child(self.render_header(appearance));
-        column.add_child(self.render_total_usage_row(conversation, rollup.as_ref(), appearance));
         column.add_child(self.render_usage_breakdown_section(
             conversation,
             rollup.as_ref(),
             appearance,
         ));
+        column.add_child(self.render_platform_usage_section(conversation, appearance));
         column.add_child(self.render_tool_call_summary_section(conversation, appearance));
         column.add_child(self.render_response_time_section(conversation, appearance));
 
@@ -932,6 +956,35 @@ fn agent_row_color(entry: &PerAgentCreditEntry, theme: &WarpTheme) -> ColorU {
     }
 }
 
+/// Computes the conversation- (or, when an orchestration rollup applies,
+/// rollup-) wide total tokens and dollar cost, shared by the inference/agent
+/// usage section's collapsed-summary text and its expanded "All models"/
+/// "All agents" row so the two always agree.
+fn total_usage_tokens_and_cost(
+    conversation: &AIConversation,
+    rollup: Option<&OrchestrationCreditRollup>,
+) -> (Option<u64>, Option<f32>) {
+    match rollup {
+        Some(rollup) => (
+            rollup.total_tokens.map(u64::from),
+            rollup.total_cost_in_cents,
+        ),
+        None => {
+            let total_tokens: u64 = conversation
+                .token_usage()
+                .iter()
+                .map(|model| {
+                    (model.warp_tokens + model.byok_tokens + model.custom_endpoint_tokens) as u64
+                })
+                .sum();
+            (
+                Some(total_tokens),
+                conversation.usage_totals().cost_in_cents,
+            )
+        }
+    }
+}
+
 /// Formats a raw token count using a `k`-suffixed abbreviation above 1000
 /// tokens (e.g. `9.6k`), matching the Figma copy's token formatting.
 fn format_token_count(tokens: u64) -> String {
@@ -975,6 +1028,20 @@ fn format_count_and_cost(count: u32, unit: &str, cost_in_cents: f32) -> String {
         return count_text;
     }
     format!("{count_text} / ${:.2}", cost_in_cents / 100.)
+}
+
+/// Formats a bare dollar cost, e.g. `"$0.36"`, for values with no
+/// associated token/count figure (currently just the platform fee). Shows
+/// an em dash when the cost is unknown or `FeatureFlag::PricingTransparency`
+/// is disabled.
+fn format_cost_only(cost_in_cents: Option<f32>) -> String {
+    if !FeatureFlag::PricingTransparency.is_enabled() {
+        return "\u{2014}".to_string();
+    }
+    match cost_in_cents {
+        Some(cost) => format!("${:.2}", cost / 100.),
+        None => "\u{2014}".to_string(),
+    }
 }
 
 /// Renders a model's input/output/cache/web-search charged-usage breakdown,
