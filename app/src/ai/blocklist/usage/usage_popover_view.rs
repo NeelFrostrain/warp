@@ -265,24 +265,42 @@ impl UsagePopoverView {
         .finish()
     }
 
-    /// Renders a non-collapsible section header: an overline `label` with
-    /// no chevron and no click handling, for sections (e.g. Platform Usage)
-    /// that have no expand/collapse state.
-    fn render_static_section_header(
+    /// Renders a non-collapsible section header with a value on the right
+    /// (same visual treatment as a collapsible header's collapsed-state
+    /// summary, minus the chevron): an overline `label` on the left, `value`
+    /// on the right, no click handling. Used for sections (e.g. Platform
+    /// Usage) that have no expand/collapse state or separate content rows.
+    fn render_static_section_header_with_value(
         &self,
         label: &str,
+        value: String,
         appearance: &Appearance,
     ) -> Box<dyn Element> {
         let theme = appearance.theme();
         let background = theme.surface_2();
         let label_color = blended_colors::text_disabled(theme, background);
-        Text::new(
-            label.to_string(),
-            appearance.overline_font_family(),
-            appearance.overline_font_size() + 2.,
-        )
-        .with_color(label_color)
-        .finish()
+        let value_color = blended_colors::text_sub(theme, background);
+
+        space_between_row()
+            .with_child(
+                Text::new(
+                    label.to_string(),
+                    appearance.overline_font_family(),
+                    appearance.overline_font_size() + 2.,
+                )
+                .with_color(label_color)
+                .finish(),
+            )
+            .with_child(
+                Text::new(
+                    value,
+                    appearance.ui_font_family(),
+                    appearance.ui_font_size(),
+                )
+                .with_color(value_color)
+                .finish(),
+            )
+            .finish()
     }
 
     /// Renders either the per-model breakdown (default) or, when an
@@ -332,8 +350,9 @@ impl UsagePopoverView {
     /// Renders the non-collapsible "PLATFORM USAGE" section: Warp's
     /// platform fee (infrastructure/orchestration overhead), which unlike
     /// inference cost isn't attributable to any single model, so it's
-    /// broken out into its own always-visible section rather than folded
-    /// into the inference usage breakdown.
+    /// shown as a single label/value row (no separate content, no
+    /// expand/collapse) rather than folded into the inference usage
+    /// breakdown.
     fn render_platform_usage_section(
         &self,
         conversation: &AIConversation,
@@ -344,14 +363,11 @@ impl UsagePopoverView {
             .charged_usage
             .map(|charged_usage| charged_usage.platform_cost_in_cents);
 
-        let mut column = Flex::column().with_spacing(8.);
-        column.add_child(self.render_static_section_header("PLATFORM USAGE", appearance));
-        column.add_child(render_label_value_row(
-            "Platform fee",
+        self.render_static_section_header_with_value(
+            "PLATFORM USAGE",
             format_cost_only(platform_cost_in_cents),
             appearance,
-        ));
-        column.finish()
+        )
     }
 
     fn render_model_usage_rows(
@@ -723,11 +739,17 @@ impl UsagePopoverView {
             return Empty::new().finish();
         }
 
+        // Prefer the wall-to-wall total (including tool call time) for the
+        // collapsed summary, since that's the most representative single
+        // "total time" figure; fall back to agent response time alone when
+        // the wall-clock total isn't available.
+        let total_time_ms = wall_ms.filter(|&ms| ms != 0).unwrap_or(response_ms);
+
         let mut column = Flex::column().with_spacing(8.);
         column.add_child(self.render_section_header(
             "RESPONSE TIME",
             self.response_time_section_expanded,
-            Some(format!("{:.1}s", response_ms as f64 / 1000.)),
+            Some(format!("{:.1}s", total_time_ms as f64 / 1000.)),
             self.response_time_toggle_mouse_state.clone(),
             UsagePopoverAction::ToggleResponseTimeSection,
             appearance,
