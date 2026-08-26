@@ -2169,6 +2169,88 @@ fn ctrl_t_handoff_cancel_restores_cursor_to_original_offset_mid_line() {
     });
 }
 
+/// Exercises the real trigger path (`Input::trigger_external_ctrl_t_file_search`), not just the
+/// completion-side apply function: the cursor offset the cancel restore uses must be the one
+/// actually captured live when ctrl-t was pressed, not a hand-picked value fed straight into
+/// `handle_block_completed_event`. A regression that stales or drops the captured offset between
+/// trigger and completion would still pass
+/// `ctrl_t_handoff_cancel_restores_cursor_to_original_offset_mid_line` (which never calls the
+/// trigger) but fail this one.
+#[test]
+fn ctrl_t_handoff_cancel_restores_cursor_captured_by_a_real_trigger() {
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        let terminal = add_window_with_bootstrapped_terminal(&mut app, None, None).await;
+        let input = terminal.read(&app, |view, _| view.input().clone());
+
+        // Cursor sits right after "echo START ", before "MIDDLE" -- mirrors a user typing the
+        // command, arrowing left, then pressing ctrl-t.
+        input.update(&mut app, |input, ctx| {
+            input.user_insert("echo START MIDDLE", ctx);
+            input.editor().update(ctx, |editor, ctx| {
+                editor.select_ranges_by_byte_offset(
+                    [ByteOffset::from(11)..ByteOffset::from(11)],
+                    ctx,
+                );
+            });
+        });
+
+        let started = input.update(&mut app, |input, ctx| {
+            input.trigger_external_ctrl_t_file_search(
+                "warp_run_external_ctrl_t_widget",
+                CtrlTApplyMode::Splice,
+                ctx,
+            )
+        });
+        assert!(started, "the handoff command should have started");
+
+        let block_id = terminal.read(&app, |terminal, _| {
+            terminal.model.lock().block_list().active_block_id().clone()
+        });
+
+        // The test harness never actually advances the block list in response to
+        // `Event::ExecuteCommand` (no pty is running), so `block_id` above is still the same
+        // block `deferred_remote_operations.latest_block_id` was last set to -- unlike the real
+        // flow, where the helper command's block is a genuinely new one. Force it stale here so
+        // `handle_block_completed_event`'s restore branch actually runs, exactly as
+        // `complete_ctrl_t_handoff` does for the same reason.
+        input.update(&mut app, |input, _ctx| {
+            input.deferred_remote_operations.latest_block_id = BlockId::new();
+        });
+
+        // Simulate the shell reporting no selection (the user cancelled) -- without ever telling
+        // `Input` what cursor_offset to use; it must come from what the trigger captured.
+        input.update(&mut app, |input, ctx| {
+            input.handle_block_completed_event(
+                BlockCompletedEvent {
+                    block_type: user_block_completed_for_test(
+                        " warp_run_external_ctrl_t_widget tok-1",
+                    ),
+                    num_secrets_obfuscated: 0,
+                    block_index: BlockIndex::zero(),
+                    block_id,
+                    session_id: None,
+                    restored_block_was_local: None,
+                },
+                ctx,
+            );
+        });
+
+        input.read(&app, |input, ctx| {
+            assert_eq!(input.buffer_text(ctx), "echo START MIDDLE");
+            assert_eq!(
+                input
+                    .editor()
+                    .as_ref(ctx)
+                    .end_byte_index_of_last_selection(ctx),
+                ByteOffset::from(11),
+                "cancelling a handoff whose cursor was captured by a real trigger must restore \
+                 the cursor to where ctrl-t was pressed, not the end of the buffer"
+            );
+        });
+    });
+}
+
 /// fish's `fzf-file-widget` already performs its own token-aware replacement, so its selection
 /// (see `CtrlTApplyMode::Replace`) must land as the finished buffer wholesale -- not spliced into
 /// `original_buffer` the way bash/zsh's plain-path selection is. Using a `cursor_offset` that

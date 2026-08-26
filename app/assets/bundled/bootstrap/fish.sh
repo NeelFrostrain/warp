@@ -618,6 +618,10 @@ function warp_ctrl_t_draft_file_path
   echo "$dir/warp-ctrl-t-$argv[1]"
 end
 
+function warp_ctrl_t_widget_result
+  test "$argv[1]" = "$argv[2]"; or string collect -- "$argv[2]"
+end
+
 # Runs fzf directly against a find-style command as a synthetic foreground command, mirroring
 # warp_run_external_ctrl_r_widget above. Reports the selected path(s) (or an empty buffer, if
 # cancelled) via the ExternalCtrlTSelection hook so Warp can insert them into the input editor at
@@ -646,6 +650,18 @@ end
 # leaving the widget's own edit on the commandline would otherwise queue it for execution.
 # The draft file is removed on every exit from this branch, including a missing file and a
 # cancelled picker, since nothing else will ever clean it up.
+#
+# fzf-file-widget has no way to report cancellation distinctly from a selection: on Escape it
+# simply leaves the commandline exactly as seeded, so its output is indistinguishable from a
+# "selection" that happens to reproduce the original line by content alone. Collapse that case to
+# an empty result -- Warp's existing convention for "nothing selected", which bash/zsh's plain-path
+# widgets satisfy naturally since they never seed anything for cancellation to echo back -- so a
+# cancelled search restores the pre-handoff cursor instead of hitting CtrlTApplyMode::Replace's
+# no-op-on-cursor insertion path. A real selection cannot round-trip to this same false-cancel
+# case: fzf-file-widget always appends a trailing space when it completes a token, so replacing an
+# in-progress token always changes the line, and re-selecting a path already fully typed (cursor
+# past its trailing space, so there's no token left to replace) inserts a second copy rather than
+# reproducing the first -- confirmed live for both shapes.
 function warp_run_external_ctrl_t_widget
   set -l warp_ctrl_t_token "$argv[1]"
   set -l result ""
@@ -665,7 +681,7 @@ function warp_run_external_ctrl_t_widget
       commandline -r -- $original_line
       commandline -C -- $char_cursor
       fzf-file-widget
-      set result (commandline)
+      set result (warp_ctrl_t_widget_result "$original_line" (commandline))
       commandline -r ''
       rm -f "$draft_file"
   end

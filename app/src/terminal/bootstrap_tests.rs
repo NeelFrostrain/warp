@@ -282,6 +282,57 @@ fn fish_ctrl_t_detection_snippet() -> &'static str {
     &FISH_SH[start..start + end + end_marker.len()]
 }
 
+fn fish_ctrl_t_widget_result_fn() -> &'static str {
+    const FISH_SH: &str = include_str!("../../assets/bundled/bootstrap/fish.sh");
+    // Locates the function boundary structurally (start of the `function` line to its matching
+    // `end` line) rather than by matching the literal body text, so a behavioral mutation to the
+    // comparison inside it changes what the test observes instead of breaking extraction itself.
+    let start_marker = "function warp_ctrl_t_widget_result\n";
+    let start = FISH_SH
+        .find(start_marker)
+        .expect("fish ctrl-t widget result function start should exist");
+    let end_marker = "\nend\n";
+    let end = FISH_SH[start..]
+        .find(end_marker)
+        .expect("fish ctrl-t widget result function end should exist");
+    &FISH_SH[start..start + end + end_marker.len()]
+}
+
+#[test]
+fn test_fish_ctrl_t_widget_result_is_empty_when_widget_leaves_draft_unchanged() {
+    let result_fn = fish_ctrl_t_widget_result_fn();
+    let script = format!(
+        r#"
+{result_fn}
+set result (warp_ctrl_t_widget_result 'echo START MIDDLE' 'echo START MIDDLE')
+printf 'result=[%s]\n' "$result"
+"#
+    );
+    let Some(stdout) = run_fish(&script) else {
+        return;
+    };
+    assert!(stdout.contains("result=[]"), "{stdout}");
+}
+
+#[test]
+fn test_fish_ctrl_t_widget_result_preserves_changed_line() {
+    let result_fn = fish_ctrl_t_widget_result_fn();
+    let script = format!(
+        r#"
+{result_fn}
+set result (warp_ctrl_t_widget_result 'echo START MIDDLE' 'echo START nested.rs MIDDLE')
+printf 'result=[%s]\n' "$result"
+"#
+    );
+    let Some(stdout) = run_fish(&script) else {
+        return;
+    };
+    assert!(
+        stdout.contains("result=[echo START nested.rs MIDDLE]"),
+        "{stdout}"
+    );
+}
+
 /// Regression test for the fish equivalent of bash's picker-function guard: detection must
 /// decline (no tag, no interception) when `fzf-file-widget` -- the function
 /// `warp_run_external_ctrl_t_widget` now calls directly -- isn't actually defined, even though
