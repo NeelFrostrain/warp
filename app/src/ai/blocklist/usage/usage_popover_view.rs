@@ -508,7 +508,14 @@ impl UsagePopoverView {
         let color = color_for_model(&row.model_id);
         let expanded = self.expanded_model_ids.contains(&row.model_id);
 
-        let full_label = match row.role_badge {
+        // "Primary agent" is the common/default case (the conversation's
+        // main model), so calling it out on every row is just noise; only
+        // the exceptional "Full terminal use" badge (and any future
+        // non-default category) is worth displaying. The underlying
+        // `role_badge` field still carries "Primary agent" for sorting
+        // (see `model_usage_rows`).
+        let display_role_badge = row.role_badge.filter(|&role| role != "Primary agent");
+        let full_label = match display_role_badge {
             Some(role) => format!("{} ({role})", row.model_id),
             None => row.model_id.clone(),
         };
@@ -538,7 +545,7 @@ impl UsagePopoverView {
             )
             .finish(),
         );
-        if let Some(role) = row.role_badge {
+        if let Some(role) = display_role_badge {
             label_row.add_child(
                 Text::new(format!(" ({role})"), appearance.ui_font_family(), font_size)
                     .with_color(blended_colors::text_sub(theme, background))
