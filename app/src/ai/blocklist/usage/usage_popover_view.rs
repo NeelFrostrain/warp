@@ -1296,17 +1296,20 @@ fn with_tooltip(
     .finish()
 }
 
-/// Renders a small opaque tooltip box containing `text`. Uses an explicit
-/// solid background (`theme.surface_3()`) rather than the shared `Tooltip`
-/// UI component's default, which derives from `theme.background()` --
-/// the one theme color allowed to carry the user's configured
-/// window-opacity/blur setting (it's meant for large surfaces like the
-/// terminal view), which is exactly why that default can read as
-/// translucent here. `surface_3()`/`surface_2()` are the same always-opaque
-/// surface colors already used for the rest of the popover's own chrome.
+/// Renders a small opaque tooltip box containing `text`. The background's
+/// alpha channel is forced to fully opaque explicitly, rather than trusting
+/// any theme color's own alpha: neither `Fill::into_solid()` nor
+/// `coloru_with_opacity()` ever *force* full opacity -- they only preserve
+/// or proportionally scale whatever alpha the color already has -- and
+/// `theme.background()` (and, transitively through its blend chain,
+/// `surface_1()`/`surface_2()`/`surface_3()`) can carry a reduced alpha
+/// from the user's window-opacity/blur setting. Without forcing it here,
+/// the box reads as translucent against whatever row happens to be behind
+/// it.
 fn render_tooltip_box(text: String, appearance: &Appearance) -> Box<dyn Element> {
     let theme = appearance.theme();
-    let bg = theme.surface_3().into_solid();
+    let surface = theme.surface_3().into_solid();
+    let bg = ColorU::new(surface.r, surface.g, surface.b, 255);
     Container::new(
         Text::new(text, appearance.ui_font_family(), appearance.ui_font_size())
             .with_color(blended_colors::text_main(theme, bg))
