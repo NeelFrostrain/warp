@@ -3876,30 +3876,29 @@ fn render_turn_panel_button(props: Props, app: &AppContext) -> Box<dyn Element> 
     let appearance = Appearance::as_ref(app);
     let ui_builder = appearance.ui_builder().clone();
 
-    // Sum turn-scoped per-model usage for the tooltip, so it reads as the
+    // Sum turn-scoped per-model cost for the tooltip, so it reads as the
     // same total the panel's per-model rows add up to.
-    let (turn_tokens, turn_cost_in_cents) = conversation
+    let turn_cost_in_cents: f32 = conversation
         .per_model_usage_for_last_block()
         .iter()
-        .fold((0u64, 0f32), |(tokens, cost), (_, model_usage)| {
-            (
-                tokens + model_usage.tokens(),
-                cost + model_usage.cost_in_cents(),
-            )
-        });
+        .map(|(_, model_usage)| model_usage.cost_in_cents())
+        .sum();
     // The tooltip is the one place the Turn panel respects the Credits/
     // Dollars display-unit toggle: `format_usage` shows dollars when the
     // unit is Dollars and a cost is known, else falls back to credits.
     // There's no per-model credits breakdown (only an aggregate turn-level
     // credits figure), so the panel itself always shows dollars; see the
-    // panel's own "CREDITS" section for the credits-mode total.
+    // panel's own "CREDITS" section for the credits-mode total. Tokens are
+    // omitted here (unlike `format_usage`'s other call sites) since the
+    // tooltip is meant to be a quick dollars/credits readout, not a full
+    // usage summary.
     let usage_display_unit = AISettings::as_ref(app).usage_display_unit;
     let credits_spent_for_last_block = conversation.credits_spent_for_last_block().unwrap_or(0.0);
     let tooltip_text = format!(
         "Turn: {}",
         format_usage(
             credits_spent_for_last_block,
-            turn_tokens.try_into().ok(),
+            None,
             Some(turn_cost_in_cents).filter(|&cost| cost > 0.0),
             usage_display_unit,
         )
