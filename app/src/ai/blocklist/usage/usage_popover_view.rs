@@ -30,6 +30,7 @@ use std::collections::{HashMap, HashSet};
 
 use pathfinder_color::ColorU;
 use pathfinder_geometry::vector::vec2f;
+use thousands::Separable;
 use warp_core::ui::Icon;
 use warp_core::ui::theme::WarpTheme;
 use warpui::elements::{
@@ -121,14 +122,15 @@ pub struct UsagePopoverView {
     /// Keyed by model id rather than a fixed set of fields since the list of
     /// models is dynamic per-conversation.
     expanded_model_ids: HashSet<String>,
-    /// Per-model hover state backing the "full model name" tooltip shown
-    /// over a truncated per-model row label. Lazily populated (keyed by
-    /// model id, mirroring `expanded_model_ids`) since the model list is
+    /// Persistent per-tooltip hover state, keyed by a descriptive string
+    /// unique to each hoverable instance (e.g. a model id for the "full
+    /// model name" tooltip, or `"value:model:{id}"` for that model's
+    /// token-count tooltip). Lazily populated since the set of rows is
     /// dynamic; wrapped in a `RefCell` so it can be populated from
     /// `View::render`'s `&self`. A fresh `MouseStateHandle::default()` on
     /// every render would never register as hovered, since the hover-in
     /// delay needs a stable handle across renders to fire.
-    model_label_hover_states: RefCell<HashMap<String, MouseStateHandle>>,
+    hover_states: RefCell<HashMap<String, MouseStateHandle>>,
     model_usage_toggle_mouse_state: MouseStateHandle,
     tool_call_summary_toggle_mouse_state: MouseStateHandle,
     response_time_toggle_mouse_state: MouseStateHandle,
@@ -148,7 +150,7 @@ impl UsagePopoverView {
             response_time_section_expanded: true,
             rollup_show_all: false,
             expanded_model_ids: HashSet::new(),
-            model_label_hover_states: RefCell::new(HashMap::new()),
+            hover_states: RefCell::new(HashMap::new()),
             model_usage_toggle_mouse_state: MouseStateHandle::default(),
             tool_call_summary_toggle_mouse_state: MouseStateHandle::default(),
             response_time_toggle_mouse_state: MouseStateHandle::default(),
@@ -219,11 +221,13 @@ impl UsagePopoverView {
     /// summary text (e.g. "144.3k tokens / $0.21", "12 tool calls") is
     /// shown just before the chevron, so key information stays visible
     /// without expanding the section.
+    #[allow(clippy::too_many_arguments)]
     fn render_section_header(
         &self,
         label: &str,
         expanded: bool,
         collapsed_summary: Option<String>,
+        collapsed_summary_tooltip: Option<String>,
         mouse_state: MouseStateHandle,
         action: UsagePopoverAction,
         appearance: &Appearance,
@@ -237,6 +241,11 @@ impl UsagePopoverView {
         } else {
             Icon::ChevronRight
         };
+        // Fetched up front (rather than inside the closure below) so the
+        // closure never needs to capture `self`.
+        let summary_hover_state = collapsed_summary_tooltip
+            .is_some()
+            .then(|| self.hover_state_for(format!("value:header:{label}")));
         let label = label.to_string();
         let overline_font_family = appearance.overline_font_family();
         // A couple points larger than the raw overline size so the section
@@ -258,11 +267,20 @@ impl UsagePopoverView {
                 .with_cross_axis_alignment(CrossAxisAlignment::Center)
                 .with_spacing(6.);
             if !expanded && let Some(summary) = &collapsed_summary {
-                right.add_child(
+                let summary_element =
                     Text::new(summary.clone(), summary_font_family, summary_font_size)
                         .with_color(summary_color)
-                        .finish(),
-                );
+                        .finish();
+                let summary_element = match (&summary_hover_state, &collapsed_summary_tooltip) {
+                    (Some(hover_state), Some(tooltip_text)) => with_tooltip(
+                        hover_state.clone(),
+                        summary_element,
+                        tooltip_text.clone(),
+                        appearance,
+                    ),
+                    _ => summary_element,
+                };
+                right.add_child(summary_element);
             }
             right.add_child(icon_element);
             space_between_row()
@@ -329,6 +347,7 @@ impl UsagePopoverView {
     ) -> Box<dyn Element> {
         let (total_tokens, total_cost_in_cents) = total_usage_tokens_and_cost(conversation, rollup);
         let collapsed_summary = format_tokens_and_cost(total_tokens, total_cost_in_cents);
+        let collapsed_summary_tooltip = total_tokens.and_then(exact_token_count_tooltip);
 
         let mut column = Flex::column().with_spacing(8.);
         if let Some(rollup) = rollup {
@@ -336,6 +355,7 @@ impl UsagePopoverView {
                 "AGENT USAGE",
                 self.model_usage_section_expanded,
                 Some(collapsed_summary),
+                collapsed_summary_tooltip,
                 self.model_usage_toggle_mouse_state.clone(),
                 UsagePopoverAction::ToggleModelUsageSection,
                 appearance,
@@ -348,6 +368,7 @@ impl UsagePopoverView {
                 "INFERENCE USAGE",
                 self.model_usage_section_expanded,
                 Some(collapsed_summary),
+                collapsed_summary_tooltip,
                 self.model_usage_toggle_mouse_state.clone(),
                 UsagePopoverAction::ToggleModelUsageSection,
                 appearance,
@@ -416,6 +437,22 @@ impl UsagePopoverView {
         // (the same source as the header's "Total Usage" row) rather than
         // re-summing per-model costs, so the two always agree even if a
         // model's cost hasn't been individually attributed yet.
+        let all_models_value = Text::new(
+            format_tokens_and_cost(
+                Some(total_tokens),
+                conversation.usage_totals().cost_in_cents,
+            ),
+            appearance.ui_font_family(),
+            font_size,
+        )
+        .with_color(blended_colors::text_main(theme, background))
+        .finish();
+        let all_models_value = self.maybe_with_tooltip(
+            "value:all_models".to_string(),
+            all_models_value,
+            exact_token_count_tooltip(total_tokens),
+            appearance,
+        );
         column.add_child(
             space_between_row()
                 .with_child(
@@ -427,18 +464,7 @@ impl UsagePopoverView {
                     .with_color(blended_colors::text_sub(theme, background))
                     .finish(),
                 )
-                .with_child(
-                    Text::new(
-                        format_tokens_and_cost(
-                            Some(total_tokens),
-                            conversation.usage_totals().cost_in_cents,
-                        ),
-                        appearance.ui_font_family(),
-                        font_size,
-                    )
-                    .with_color(blended_colors::text_main(theme, background))
-                    .finish(),
-                )
+                .with_child(all_models_value)
                 .finish(),
         );
 
@@ -520,57 +546,12 @@ impl UsagePopoverView {
             );
         }
 
-        // A persistent per-model hover state is needed for the tooltip's
-        // hover-in delay to ever fire; see `model_label_hover_states`' docs.
-        let hover_state = self
-            .model_label_hover_states
-            .borrow_mut()
-            .entry(row.model_id.clone())
-            .or_default()
-            .clone();
-        // Built manually (rather than via the shared `Tooltip` UI component,
-        // whose blended background reads as translucent against the row
-        // beneath it) with an explicit solid background, border, and drop
-        // shadow, so it's unambiguously opaque and legible.
-        let tooltip_bg = theme.background().into_solid();
-        let tooltip_text_color = blended_colors::text_main(theme, tooltip_bg);
-        let tooltip_border_color = theme.outline().into_solid();
-        let tooltip_font_family = appearance.ui_font_family();
-        let label_row_element = label_row.finish();
-        let label_with_tooltip = Hoverable::new(hover_state, move |state| {
-            let mut stack = Stack::new().with_child(label_row_element);
-            if state.is_hovered() {
-                let tooltip = Container::new(
-                    Text::new(full_label, tooltip_font_family, font_size)
-                        .with_color(tooltip_text_color)
-                        .with_selectable(false)
-                        .finish(),
-                )
-                .with_background_color(tooltip_bg)
-                .with_border(Border::all(1.).with_border_color(tooltip_border_color))
-                .with_corner_radius(CornerRadius::with_all(Radius::Pixels(4.)))
-                .with_padding_left(8.)
-                .with_padding_right(8.)
-                .with_padding_top(4.)
-                .with_padding_bottom(4.)
-                .with_drop_shadow(
-                    DropShadow::new_with_standard_offset_and_spread(ColorU::new(0, 0, 0, 48))
-                        .with_offset(vec2f(0., 4.)),
-                )
-                .finish();
-                stack.add_positioned_overlay_child(
-                    tooltip,
-                    OffsetPositioning::offset_from_parent(
-                        vec2f(0., 4.),
-                        ParentOffsetBounds::WindowByPosition,
-                        ParentAnchor::BottomLeft,
-                        ChildAnchor::TopLeft,
-                    ),
-                );
-            }
-            stack.finish()
-        })
-        .finish();
+        let label_with_tooltip = with_tooltip(
+            self.hover_state_for(format!("label:model:{}", row.model_id)),
+            label_row.finish(),
+            full_label,
+            appearance,
+        );
 
         // The label is wrapped in `Expanded`: a plain (non-flex) `Text` in a
         // `Flex::row` sizes to its own intrinsic width regardless of the
@@ -591,6 +572,12 @@ impl UsagePopoverView {
         )
         .with_color(blended_colors::text_main(theme, background))
         .finish();
+        let value = self.maybe_with_tooltip(
+            format!("value:model:{}", row.model_id),
+            value,
+            exact_token_count_tooltip(row.tokens),
+            appearance,
+        );
         let chevron =
             ConstrainedBox::new(chevron_icon.to_warpui_icon(chevron_color.into()).finish())
                 .with_width(10.)
@@ -610,7 +597,9 @@ impl UsagePopoverView {
         let mut column = Flex::column().with_spacing(6.).with_child(summary_row);
         if expanded {
             let breakdown = match row.charged_usage {
-                Some(charged_usage) => render_charged_usage_breakdown(&charged_usage, appearance),
+                Some(charged_usage) => {
+                    self.render_charged_usage_breakdown(&row.model_id, &charged_usage, appearance)
+                }
                 None => Text::new(
                     "No detailed breakdown available".to_string(),
                     appearance.ui_font_family(),
@@ -642,6 +631,143 @@ impl UsagePopoverView {
             .finish()
     }
 
+    /// Renders a model's input/output/cache/web-search charged-usage
+    /// breakdown, shown beneath a per-model row when expanded. Rows are
+    /// omitted for categories the model didn't incur (e.g. cache tokens
+    /// only apply to Anthropic models, and web searches are relatively
+    /// rare). Each token-count row gets an "exact amount" tooltip when its
+    /// value is large enough to be abbreviated, keyed by `model_id` plus a
+    /// per-category suffix so each row has its own persistent hover state.
+    fn render_charged_usage_breakdown(
+        &self,
+        model_id: &str,
+        charged_usage: &PersistedModelTokenCost,
+        appearance: &Appearance,
+    ) -> Box<dyn Element> {
+        let mut column = Flex::column().with_spacing(4.);
+        if charged_usage.total_input > 0 {
+            column.add_child(self.render_label_value_row_with_tooltip(
+                format!("value:model:{model_id}:input"),
+                "Input tokens",
+                format_tokens_and_cost(
+                    Some(charged_usage.total_input),
+                    Some(charged_usage.input_cost_in_cents),
+                ),
+                exact_token_count_tooltip(charged_usage.total_input),
+                appearance,
+            ));
+        }
+        if charged_usage.output > 0 {
+            column.add_child(self.render_label_value_row_with_tooltip(
+                format!("value:model:{model_id}:output"),
+                "Output tokens",
+                format_tokens_and_cost(
+                    Some(charged_usage.output),
+                    Some(charged_usage.output_cost_in_cents),
+                ),
+                exact_token_count_tooltip(charged_usage.output),
+                appearance,
+            ));
+        }
+        if charged_usage.input_cache_read > 0 {
+            column.add_child(self.render_label_value_row_with_tooltip(
+                format!("value:model:{model_id}:cache_read"),
+                "Cache read tokens",
+                format_tokens_and_cost(
+                    Some(charged_usage.input_cache_read),
+                    Some(charged_usage.input_cache_read_cost_in_cents),
+                ),
+                exact_token_count_tooltip(charged_usage.input_cache_read),
+                appearance,
+            ));
+        }
+        if charged_usage.input_cache_write > 0 {
+            column.add_child(self.render_label_value_row_with_tooltip(
+                format!("value:model:{model_id}:cache_write"),
+                "Cache write tokens",
+                format_tokens_and_cost(
+                    Some(charged_usage.input_cache_write),
+                    Some(charged_usage.input_cache_write_cost_in_cents),
+                ),
+                exact_token_count_tooltip(charged_usage.input_cache_write),
+                appearance,
+            ));
+        }
+        if charged_usage.web_search_count > 0 {
+            column.add_child(render_label_value_row(
+                "Web searches",
+                format_count_and_cost(
+                    charged_usage.web_search_count as u32,
+                    "searches",
+                    charged_usage.web_search_cost_in_cents,
+                ),
+                appearance,
+            ));
+        }
+        column.finish()
+    }
+
+    /// Like [`render_label_value_row`], but wraps the value in a hover
+    /// tooltip (see [`Self::maybe_with_tooltip`]) when `tooltip_text` is
+    /// present -- used for token-count rows whose displayed value may be
+    /// abbreviated.
+    fn render_label_value_row_with_tooltip(
+        &self,
+        key: String,
+        label: &str,
+        value: String,
+        tooltip_text: Option<String>,
+        appearance: &Appearance,
+    ) -> Box<dyn Element> {
+        let theme = appearance.theme();
+        let background = theme.surface_2();
+        let font_size = appearance.ui_font_size();
+        let value_element = Text::new(value, appearance.ui_font_family(), font_size)
+            .with_color(blended_colors::text_main(theme, background))
+            .finish();
+        let value_element = self.maybe_with_tooltip(key, value_element, tooltip_text, appearance);
+        space_between_row()
+            .with_child(
+                Text::new(label.to_string(), appearance.ui_font_family(), font_size)
+                    .with_color(blended_colors::text_sub(theme, background))
+                    .finish(),
+            )
+            .with_child(value_element)
+            .finish()
+    }
+
+    /// Fetches (lazily creating if needed) the persistent hover state
+    /// backing a tooltip keyed by `key`. See `hover_states`' docs for why
+    /// persistence (vs. a fresh `MouseStateHandle::default()` per render)
+    /// matters.
+    fn hover_state_for(&self, key: impl Into<String>) -> MouseStateHandle {
+        self.hover_states
+            .borrow_mut()
+            .entry(key.into())
+            .or_default()
+            .clone()
+    }
+
+    /// Wraps `content` in a hover tooltip showing `tooltip_text`, when
+    /// present -- e.g. the exact token count behind an abbreviated "9.6k
+    /// tokens" figure (see [`exact_token_count_tooltip`]). Returns
+    /// `content` unchanged when `tooltip_text` is `None` (nothing to
+    /// disambiguate, so no tooltip is worth showing).
+    fn maybe_with_tooltip(
+        &self,
+        key: String,
+        content: Box<dyn Element>,
+        tooltip_text: Option<String>,
+        appearance: &Appearance,
+    ) -> Box<dyn Element> {
+        match tooltip_text {
+            Some(tooltip_text) => {
+                with_tooltip(self.hover_state_for(key), content, tooltip_text, appearance)
+            }
+            None => content,
+        }
+    }
+
     /// Per-agent breakdown (Surface 6), adopting the same stacked-bar +
     /// swatch treatment as the per-model breakdown rather than Surface 6's
     /// original plain label/value list.
@@ -655,6 +781,20 @@ impl UsagePopoverView {
         let font_size = appearance.ui_font_size();
 
         let mut column = Flex::column().with_spacing(6.);
+        let all_agents_tokens = rollup.total_tokens.map(u64::from);
+        let all_agents_value = Text::new(
+            format_tokens_and_cost(all_agents_tokens, rollup.total_cost_in_cents),
+            appearance.ui_font_family(),
+            font_size,
+        )
+        .with_color(blended_colors::text_main(theme, background))
+        .finish();
+        let all_agents_value = self.maybe_with_tooltip(
+            "value:all_agents".to_string(),
+            all_agents_value,
+            all_agents_tokens.and_then(exact_token_count_tooltip),
+            appearance,
+        );
         column.add_child(
             space_between_row()
                 .with_child(
@@ -666,18 +806,7 @@ impl UsagePopoverView {
                     .with_color(blended_colors::text_sub(theme, background))
                     .finish(),
                 )
-                .with_child(
-                    Text::new(
-                        format_tokens_and_cost(
-                            rollup.total_tokens.map(u64::from),
-                            rollup.total_cost_in_cents,
-                        ),
-                        appearance.ui_font_family(),
-                        font_size,
-                    )
-                    .with_color(blended_colors::text_main(theme, background))
-                    .finish(),
-                )
+                .with_child(all_agents_value)
                 .finish(),
         );
 
@@ -737,13 +866,20 @@ impl UsagePopoverView {
         .soft_wrap(false)
         .with_clip(ClipConfig::ellipsis())
         .finish();
+        let entry_tokens = entry.tokens.map(u64::from);
         let value = Text::new(
-            format_tokens_and_cost(entry.tokens.map(u64::from), entry.cost_in_cents),
+            format_tokens_and_cost(entry_tokens, entry.cost_in_cents),
             appearance.ui_font_family(),
             font_size,
         )
         .with_color(blended_colors::text_sub(theme, background))
         .finish();
+        let value = self.maybe_with_tooltip(
+            format!("value:agent:{}", entry.conversation_id),
+            value,
+            entry_tokens.and_then(exact_token_count_tooltip),
+            appearance,
+        );
 
         space_between_row()
             .with_child(
@@ -795,6 +931,7 @@ impl UsagePopoverView {
             "TOOL CALL SUMMARY",
             self.tool_call_summary_section_expanded,
             Some(format!("{} tool calls", tool_usage.total_tool_calls())),
+            None,
             self.tool_call_summary_toggle_mouse_state.clone(),
             UsagePopoverAction::ToggleToolCallSummarySection,
             appearance,
@@ -851,6 +988,7 @@ impl UsagePopoverView {
             "RESPONSE TIME",
             self.response_time_section_expanded,
             Some(format!("{:.1}s", total_time_ms as f64 / 1000.)),
+            None,
             self.response_time_toggle_mouse_state.clone(),
             UsagePopoverAction::ToggleResponseTimeSection,
             appearance,
@@ -1121,6 +1259,74 @@ fn format_token_count(tokens: u64) -> String {
     }
 }
 
+/// Returns the exact (unabbreviated, comma-separated) token count for a
+/// tooltip, e.g. `"9,614 tokens"` -- `None` when `tokens` is small enough
+/// that [`format_token_count`] wouldn't have abbreviated it in the first
+/// place, since a tooltip repeating an already-exact "500 tokens" would be
+/// redundant.
+fn exact_token_count_tooltip(tokens: u64) -> Option<String> {
+    (tokens >= 1000).then(|| format!("{} tokens", tokens.separate_with_commas()))
+}
+
+/// Wraps `content` in a hover tooltip showing `tooltip_text` below its
+/// bottom-left corner, using the given (persistent, per-instance)
+/// `hover_state` so the hover-in delay can actually fire -- see
+/// `UsagePopoverView::hover_states`' docs for why persistence matters.
+fn with_tooltip(
+    hover_state: MouseStateHandle,
+    content: Box<dyn Element>,
+    tooltip_text: String,
+    appearance: &Appearance,
+) -> Box<dyn Element> {
+    Hoverable::new(hover_state, |state| {
+        let mut stack = Stack::new().with_child(content);
+        if state.is_hovered() {
+            stack.add_positioned_overlay_child(
+                render_tooltip_box(tooltip_text, appearance),
+                OffsetPositioning::offset_from_parent(
+                    vec2f(0., 4.),
+                    ParentOffsetBounds::WindowByPosition,
+                    ParentAnchor::BottomLeft,
+                    ChildAnchor::TopLeft,
+                ),
+            );
+        }
+        stack.finish()
+    })
+    .finish()
+}
+
+/// Renders a small opaque tooltip box containing `text`. Uses an explicit
+/// solid background (`theme.surface_3()`) rather than the shared `Tooltip`
+/// UI component's default, which derives from `theme.background()` --
+/// the one theme color allowed to carry the user's configured
+/// window-opacity/blur setting (it's meant for large surfaces like the
+/// terminal view), which is exactly why that default can read as
+/// translucent here. `surface_3()`/`surface_2()` are the same always-opaque
+/// surface colors already used for the rest of the popover's own chrome.
+fn render_tooltip_box(text: String, appearance: &Appearance) -> Box<dyn Element> {
+    let theme = appearance.theme();
+    let bg = theme.surface_3().into_solid();
+    Container::new(
+        Text::new(text, appearance.ui_font_family(), appearance.ui_font_size())
+            .with_color(blended_colors::text_main(theme, bg))
+            .with_selectable(false)
+            .finish(),
+    )
+    .with_background_color(bg)
+    .with_border(Border::all(1.).with_border_color(theme.outline().into_solid()))
+    .with_corner_radius(CornerRadius::with_all(Radius::Pixels(4.)))
+    .with_padding_left(8.)
+    .with_padding_right(8.)
+    .with_padding_top(4.)
+    .with_padding_bottom(4.)
+    .with_drop_shadow(
+        DropShadow::new_with_standard_offset_and_spread(ColorU::new(0, 0, 0, 48))
+            .with_offset(vec2f(0., 4.)),
+    )
+    .finish()
+}
+
 /// Formats a token count alongside its dollar cost, e.g. `"9.6k tokens /
 /// $0.36"`. Per the pricing-transparency "do not show credits" decision,
 /// this is the only value format used in the popover — credits are never
@@ -1168,69 +1374,6 @@ pub(crate) fn format_cost_only(cost_in_cents: Option<f32>) -> String {
         Some(cost) => format!("${:.2}", cost / 100.),
         None => "\u{2014}".to_string(),
     }
-}
-
-/// Renders a model's input/output/cache/web-search charged-usage breakdown,
-/// shown beneath a per-model row when expanded. Rows are omitted for
-/// categories the model didn't incur (e.g. cache tokens only apply to
-/// Anthropic models, and web searches are relatively rare).
-fn render_charged_usage_breakdown(
-    charged_usage: &PersistedModelTokenCost,
-    appearance: &Appearance,
-) -> Box<dyn Element> {
-    let mut column = Flex::column().with_spacing(4.);
-    if charged_usage.total_input > 0 {
-        column.add_child(render_label_value_row(
-            "Input tokens",
-            format_tokens_and_cost(
-                Some(charged_usage.total_input),
-                Some(charged_usage.input_cost_in_cents),
-            ),
-            appearance,
-        ));
-    }
-    if charged_usage.output > 0 {
-        column.add_child(render_label_value_row(
-            "Output tokens",
-            format_tokens_and_cost(
-                Some(charged_usage.output),
-                Some(charged_usage.output_cost_in_cents),
-            ),
-            appearance,
-        ));
-    }
-    if charged_usage.input_cache_read > 0 {
-        column.add_child(render_label_value_row(
-            "Cache read tokens",
-            format_tokens_and_cost(
-                Some(charged_usage.input_cache_read),
-                Some(charged_usage.input_cache_read_cost_in_cents),
-            ),
-            appearance,
-        ));
-    }
-    if charged_usage.input_cache_write > 0 {
-        column.add_child(render_label_value_row(
-            "Cache write tokens",
-            format_tokens_and_cost(
-                Some(charged_usage.input_cache_write),
-                Some(charged_usage.input_cache_write_cost_in_cents),
-            ),
-            appearance,
-        ));
-    }
-    if charged_usage.web_search_count > 0 {
-        column.add_child(render_label_value_row(
-            "Web searches",
-            format_count_and_cost(
-                charged_usage.web_search_count as u32,
-                "searches",
-                charged_usage.web_search_cost_in_cents,
-            ),
-            appearance,
-        ));
-    }
-    column.finish()
 }
 
 /// Renders a small rounded color swatch used to key a row to its bar

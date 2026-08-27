@@ -129,6 +129,24 @@ fn format_token_count_abbreviates_above_1_000_000_as_m() {
 }
 
 #[test]
+fn exact_token_count_tooltip_is_none_below_abbreviation_threshold() {
+    assert_eq!(exact_token_count_tooltip(500), None);
+    assert_eq!(exact_token_count_tooltip(999), None);
+}
+
+#[test]
+fn exact_token_count_tooltip_shows_comma_separated_count_when_abbreviated() {
+    assert_eq!(
+        exact_token_count_tooltip(9614),
+        Some("9,614 tokens".to_string())
+    );
+    assert_eq!(
+        exact_token_count_tooltip(1_614_700),
+        Some("1,614,700 tokens".to_string())
+    );
+}
+
+#[test]
 fn format_tokens_and_cost_omits_dollar_suffix_when_flag_disabled() {
     let _flag = FeatureFlag::PricingTransparency.override_enabled(false);
 
