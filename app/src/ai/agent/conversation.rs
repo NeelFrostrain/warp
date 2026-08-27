@@ -866,11 +866,38 @@ impl AIConversation {
     }
 
     // Credits spent over the last block, where the block comprises
-    // all agent outputs since the most recent user input.
+    // all agent outputs since the most recent user input. Combines both
+    // inference and platform credits; see `inference_credits_spent_for_last_block`
+    // and `platform_credits_spent_for_last_block` for the split.
     pub fn credits_spent_for_last_block(&self) -> Option<f32> {
         self.conversation_usage_metadata
             .credits_spent_for_last_block
             .map(|credits| (credits * 10.0).round() / 10.0)
+    }
+
+    /// The platform-only portion of `credits_spent_for_last_block`. See
+    /// [`ConversationUsageMetadata::platform_credits_spent_for_last_block`].
+    pub fn platform_credits_spent_for_last_block(&self) -> Option<f32> {
+        self.conversation_usage_metadata
+            .platform_credits_spent_for_last_block
+            .map(|credits| (credits * 10.0).round() / 10.0)
+    }
+
+    /// The inference-only portion of `credits_spent_for_last_block`,
+    /// derived as the combined total minus the platform-only portion (the
+    /// wire's `RequestCost` only reports the two split out, not inference
+    /// alone). `None` if the combined total itself is unknown; the platform
+    /// portion defaults to zero if unknown, since it's optional data on top
+    /// of the older combined figure.
+    pub fn inference_credits_spent_for_last_block(&self) -> Option<f32> {
+        let combined = self
+            .conversation_usage_metadata
+            .credits_spent_for_last_block?;
+        let platform = self
+            .conversation_usage_metadata
+            .platform_credits_spent_for_last_block
+            .unwrap_or(0.0);
+        Some(((combined - platform) * 10.0).round() / 10.0)
     }
 
     /// Platform usage charged (in US cents) over the last block (turn). See
@@ -2394,9 +2421,15 @@ impl AIConversation {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn update_cost_and_usage_for_request(
         &mut self,
         request_cost: Option<RequestCost>,
+        // The platform-only portion of `request_cost` (from the wire
+        // `RequestCost.platform_credits` field), tracked separately so the
+        // Turn panel can show inference-only and platform-only credit
+        // figures. `request_cost` itself remains the combined total.
+        platform_credits_for_request: Option<f32>,
         request_charges: Option<stream_finished::RequestCharges>,
         token_usage: Vec<TokenUsage>,
         usage_metadata: Option<stream_finished::ConversationUsageMetadata>,
@@ -2466,21 +2499,34 @@ impl AIConversation {
             entry.cost_in_cents += usage.cost_in_cents;
         }
 
+        // The reset must happen unconditionally on `was_user_initiated_request`
+        // (not only when this particular request has a cost), otherwise a new
+        // turn whose first request carries no `RequestCost` would retain the
+        // previous turn's credits.
+        if was_user_initiated_request {
+            self.conversation_usage_metadata
+                .credits_spent_for_last_block = Some(0.);
+            self.conversation_usage_metadata
+                .platform_credits_spent_for_last_block = Some(0.);
+        }
+
         if let Some(request_cost) = request_cost {
             let credits_spent_for_last_block = self
                 .conversation_usage_metadata
                 .credits_spent_for_last_block
                 .get_or_insert(0.0);
 
-            // If this exchange begins with a user input (implying it is initiating a new response),
-            // reset credits spent to only include credits for this new response.
-            if was_user_initiated_request {
-                *credits_spent_for_last_block = 0.;
-            }
-
             // Accumulate response credit usage.
             *credits_spent_for_last_block += request_cost.value() as f32;
             self.total_request_cost += request_cost;
+        }
+
+        if let Some(platform_credits_for_request) = platform_credits_for_request {
+            let platform_credits_spent_for_last_block = self
+                .conversation_usage_metadata
+                .platform_credits_spent_for_last_block
+                .get_or_insert(0.0);
+            *platform_credits_spent_for_last_block += platform_credits_for_request;
         }
 
         // `RequestCharges` reports this specific request's charges (unlike

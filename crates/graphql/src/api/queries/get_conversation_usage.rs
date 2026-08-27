@@ -198,6 +198,7 @@ impl From<&ConversationUsageMetadata> for persistence::model::ConversationUsageM
             platform_credits_spent: gql.platform_credits_spent as f32,
             total_provider_cost_in_cents: gql.total_provider_cost_in_cents.map(|cost| cost as f32),
             credits_spent_for_last_block: None,
+            platform_credits_spent_for_last_block: None,
             platform_usage_in_cents_for_last_block: None,
             // Not yet fetched by this GraphQL query (persisted-history
             // vertical, milestone 3) -- left `None` rather than fabricated.

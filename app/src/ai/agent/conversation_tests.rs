@@ -671,6 +671,7 @@ fn restored_usage_totals_preserve_server_provider_cost_and_add_follow_up() {
                     .update_cost_and_usage_for_request(
                         None,
                         None,
+                        None,
                         vec![stream_token_usage("model-a", 10, 2, 1.2)],
                         Some(credits_usage_metadata(1.0, 0.0)),
                         false,
@@ -745,6 +746,7 @@ fn restored_legacy_conversation_keeps_provider_cost_unavailable_after_follow_up(
                 .update_cost_and_usage_for_request(
                     None,
                     None,
+                    None,
                     vec![stream_token_usage("legacy-model", 10, 2, 1.5)],
                     Some(credits_usage_metadata(1.0, 0.0)),
                     false,
@@ -787,6 +789,7 @@ fn update_cost_and_usage_resolves_custom_endpoint_alias_for_footer_usage() {
                 .update_cost_and_usage_for_request(
                     None,
                     None,
+                    None,
                     vec![],
                     Some(custom_endpoint_usage_metadata("config-key", 6)),
                     false,
@@ -821,6 +824,7 @@ fn update_cost_and_usage_uses_fallback_label_for_unknown_custom_endpoint() {
         app.read(|ctx| {
             conversation
                 .update_cost_and_usage_for_request(
+                    None,
                     None,
                     None,
                     vec![],
@@ -906,6 +910,7 @@ fn usage_totals_reads_gui_credits_and_accumulates_provider_cost() {
                 .update_cost_and_usage_for_request(
                     None,
                     None,
+                    None,
                     vec![stream_token_usage("model-a", 100, 20, 1.5)],
                     Some(credits_usage_metadata(2.0, 0.5)),
                     false,
@@ -917,6 +922,7 @@ fn usage_totals_reads_gui_credits_and_accumulates_provider_cost() {
             // summing, while provider cost accumulates per request.
             conversation
                 .update_cost_and_usage_for_request(
+                    None,
                     None,
                     None,
                     vec![stream_token_usage("model-a", 50, 10, 1.2)],
@@ -1051,7 +1057,7 @@ fn update_cost_and_usage_resets_stale_charged_usage_for_last_block_on_new_user_t
 
         app.read(|ctx| {
             conversation
-                .update_cost_and_usage_for_request(None, None, vec![], None, true, ctx)
+                .update_cost_and_usage_for_request(None, None, None, vec![], None, true, ctx)
                 .expect("usage should update");
         });
 
@@ -1085,6 +1091,7 @@ fn per_model_usage_for_last_block_survives_restore() {
             conversation
                 .update_cost_and_usage_for_request(
                     None,
+                    None,
                     Some(request_charges_for_model("model-a", 100, 20, 1.5)),
                     vec![],
                     None,
@@ -1095,6 +1102,7 @@ fn per_model_usage_for_last_block_survives_restore() {
             // Second turn: only this call's usage should count as "last block".
             conversation
                 .update_cost_and_usage_for_request(
+                    None,
                     None,
                     Some(request_charges_for_model("model-a", 50, 10, 2.5)),
                     vec![],
@@ -1160,7 +1168,15 @@ fn platform_usage_resets_when_a_new_turn_has_no_charges() {
                 .expect("category should exist")
                 .platform_usage_in_cents = 42.0;
             conversation
-                .update_cost_and_usage_for_request(None, Some(charged), vec![], None, true, ctx)
+                .update_cost_and_usage_for_request(
+                    None,
+                    None,
+                    Some(charged),
+                    vec![],
+                    None,
+                    true,
+                    ctx,
+                )
                 .expect("usage should update");
         });
         assert_eq!(
@@ -1170,7 +1186,7 @@ fn platform_usage_resets_when_a_new_turn_has_no_charges() {
 
         app.read(|ctx| {
             conversation
-                .update_cost_and_usage_for_request(None, None, vec![], None, true, ctx)
+                .update_cost_and_usage_for_request(None, None, None, vec![], None, true, ctx)
                 .expect("usage should update");
         });
 
@@ -1222,6 +1238,7 @@ fn per_model_usage_for_last_block_includes_web_search_only_activity() {
         app.read(|ctx| {
             conversation
                 .update_cost_and_usage_for_request(
+                    None,
                     None,
                     Some(request_charges_with_web_search_only("model-a", 3, 1.2)),
                     vec![],
@@ -1309,6 +1326,7 @@ fn cumulative_token_cost_by_model_resolves_custom_endpoint_alias() {
             conversation
                 .update_cost_and_usage_for_request(
                     None,
+                    None,
                     Some(request_charges),
                     vec![],
                     None,
@@ -1369,6 +1387,7 @@ fn turn_usage_snapshot_for_exchange_preserves_historical_turn_data() {
             conversation
                 .update_cost_and_usage_for_request(
                     None,
+                    None,
                     Some(request_charges_for_model("model-a", 100, 20, 1.5)),
                     vec![],
                     None,
@@ -1386,6 +1405,7 @@ fn turn_usage_snapshot_for_exchange_preserves_historical_turn_data() {
         app.read(|ctx| {
             conversation
                 .update_cost_and_usage_for_request(
+                    None,
                     None,
                     Some(request_charges_for_model("model-b", 30, 5, 0.7)),
                     vec![],

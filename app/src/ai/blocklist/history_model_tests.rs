@@ -1338,6 +1338,7 @@ fn create_server_metadata(
         platform_credits_spent: 0.0,
         total_provider_cost_in_cents: None,
         credits_spent_for_last_block: None,
+        platform_credits_spent_for_last_block: None,
         platform_usage_in_cents_for_last_block: None,
         charged_usage_for_last_block: None,
         total_charged_usage: None,
@@ -3767,6 +3768,7 @@ fn charges_only_completion_emits_conversation_usage_metadata_updated_event() {
         history_model.update(&mut app, |model, ctx| {
             model.update_conversation_cost_and_usage_for_request(
                 conversation_id,
+                None,
                 None,
                 Some(request_charges),
                 vec![],

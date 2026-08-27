@@ -1743,6 +1743,16 @@ pub struct ConversationUsageMetadata {
     pub total_provider_cost_in_cents: Option<f32>,
     #[serde(default)]
     pub credits_spent_for_last_block: Option<f32>,
+    /// The platform-only portion of `credits_spent_for_last_block`, from the
+    /// wire `RequestCost.platform_credits` field (the rest of
+    /// `credits_spent_for_last_block` is inference credits). Accumulated the
+    /// same way as `credits_spent_for_last_block`: reset to zero at the
+    /// start of each turn, then summed across every request within it.
+    /// `None` until the first request with cost data completes. Lets the
+    /// Turn panel show inference-only and platform-only credit figures
+    /// (see [`Self::credits_spent_for_last_block`] for the combined total).
+    #[serde(default)]
+    pub platform_credits_spent_for_last_block: Option<f32>,
     /// Platform usage charged (in US cents) over the last block ("turn"),
     /// i.e. since the most recent user-initiated request. Accumulated
     /// additively from each request's `RequestCharges`, mirroring

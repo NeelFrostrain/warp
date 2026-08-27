@@ -111,14 +111,17 @@ pub struct TurnUsageInfo {
     /// data has completed yet; also omitted when the charge is truly zero,
     /// rather than rendered as a noisy `$0.00` section.
     pub platform_usage_in_cents: Option<f32>,
-    /// Total credits spent over this turn (the conversation's combined
-    /// inference + platform credit figure, from the legacy credits-based
-    /// accounting). Rendered in its own "CREDITS" section, shown only when
-    /// the user's usage-display-unit setting is `Credits` -- there's no
-    /// per-model or platform-only credits breakdown to reconcile with the
-    /// dollar-denominated sections above, so this is a single standalone
-    /// total rather than an alternate unit for those sections.
-    pub credits_spent_for_last_block: Option<f32>,
+    /// Inference-only credits spent over this turn (the combined
+    /// inference + platform legacy credits total, minus the platform
+    /// portion). Rendered as a normal "Credits" row under INFERENCE USAGE,
+    /// shown only when the user's usage-display-unit setting is `Credits`.
+    /// `None` if no cost data has landed for this turn yet.
+    pub inference_credits_spent_for_last_block: Option<f32>,
+    /// Platform-only credits spent over this turn. Rendered as a normal
+    /// "Credits" row under PLATFORM USAGE (alongside its dollar figure),
+    /// shown only when the usage-display-unit setting is `Credits` and
+    /// there's a nonzero value to show.
+    pub platform_credits_spent_for_last_block: Option<f32>,
     pub tool_calls: i32,
     pub files_changed: i32,
     pub lines_added: i32,
@@ -387,15 +390,33 @@ impl TurnUsageView {
         rows
     }
 
-    /// Label/value rows for the per-model usage entries only. Context
-    /// window usage and platform usage are rendered as their own items in
-    /// [`Self::build_label_value_columns`] rather than folded into this
-    /// list, so their spacing (and, for platform usage, its section-header
-    /// styling) can be controlled independently.
-    fn model_usage_rows(&self, appearance: &Appearance) -> Vec<LabelValueRow> {
-        (0..self.usage_info.models.len())
+    /// Label/value rows for the per-model usage entries, plus (in Credits
+    /// mode) a trailing "Credits" row for the turn's inference-only credit
+    /// total. Context window usage and platform usage are rendered as
+    /// their own items in [`Self::build_label_value_columns`] rather than
+    /// folded into this list, so their spacing (and, for platform usage,
+    /// its section-header styling) can be controlled independently.
+    fn model_usage_rows(
+        &self,
+        appearance: &Appearance,
+        usage_display_unit: UsageDisplayUnit,
+    ) -> Vec<LabelValueRow> {
+        let mut rows: Vec<LabelValueRow> = (0..self.usage_info.models.len())
             .flat_map(|index| self.model_row(index, appearance))
-            .collect()
+            .collect();
+        if usage_display_unit == UsageDisplayUnit::Credits
+            && let Some(credits) = self.usage_info.inference_credits_spent_for_last_block
+        {
+            rows.push((
+                render_label_text("Credits", appearance),
+                render_value_text(
+                    format_credits(credits),
+                    appearance.ui_font_size() + 2.,
+                    appearance,
+                ),
+            ));
+        }
+        rows
     }
 
     /// The "INFERENCE USAGE" section header, with the turn's total tokens
@@ -485,12 +506,17 @@ impl TurnUsageView {
         (label, value)
     }
 
-    /// The "PLATFORM USAGE" section: styled like the panel's other section
-    /// headers, but with the dollar amount in the value column instead of
-    /// an empty placeholder, since it has no further rows of its own.
-    /// `None` when there's no charge data yet, or the charge is truly zero
-    /// -- a `$0.00` platform usage section would just be noise.
-    fn platform_usage_row(&self, appearance: &Appearance) -> Option<LabelValueRow> {
+    /// The "PLATFORM USAGE" section: a section-header row with the dollar
+    /// amount in the value column instead of an empty placeholder, plus
+    /// (in Credits mode, if any) a trailing normal "Credits" row for the
+    /// turn's platform-only credit total. `None` when there's no charge
+    /// data yet, or the charge is truly zero -- a `$0.00` platform usage
+    /// section would just be noise.
+    fn platform_usage_rows(
+        &self,
+        appearance: &Appearance,
+        usage_display_unit: UsageDisplayUnit,
+    ) -> Option<Vec<LabelValueRow>> {
         let platform_usage_in_cents = self.usage_info.platform_usage_in_cents?;
         if platform_usage_in_cents <= 0.0 {
             return None;
@@ -499,36 +525,30 @@ impl TurnUsageView {
         // so this row's label/value heights agree, per the same reasoning
         // as the empty header/value companions in `build_label_value_columns`.
         let header_font_size = appearance.overline_font_size() + 3.;
-        Some((
+        let mut rows = vec![(
             Self::render_section_header("PLATFORM USAGE", appearance),
             render_value_text(
                 format_dollars(platform_usage_in_cents),
                 header_font_size,
                 appearance,
             ),
-        ))
-    }
-
-    /// The "CREDITS" section: a standalone total shown only when the user's
-    /// usage-display-unit setting is `Credits`. Unlike `PLATFORM USAGE`,
-    /// which breaks out one component of the dollar-denominated total,
-    /// there is no per-model or platform-only credits breakdown to show
-    /// here -- this is simply the turn's overall credit spend, in its own
-    /// section, alongside (not replacing) the dollar figures above.
-    fn credits_section_row(&self, appearance: &Appearance) -> Option<LabelValueRow> {
-        let credits_spent_for_last_block = self.usage_info.credits_spent_for_last_block?;
-        // Matches the header's font size (rather than the body row size)
-        // so this row's label/value heights agree, per the same reasoning
-        // as the empty header/value companions in `build_label_value_columns`.
-        let header_font_size = appearance.overline_font_size() + 3.;
-        Some((
-            Self::render_section_header("CREDITS", appearance),
-            render_value_text(
-                format_credits(credits_spent_for_last_block),
-                header_font_size,
-                appearance,
-            ),
-        ))
+        )];
+        if usage_display_unit == UsageDisplayUnit::Credits
+            && let Some(credits) = self
+                .usage_info
+                .platform_credits_spent_for_last_block
+                .filter(|&credits| credits > 0.0)
+        {
+            rows.push((
+                render_label_text("Credits", appearance),
+                render_value_text(
+                    format_credits(credits),
+                    appearance.ui_font_size() + 2.,
+                    appearance,
+                ),
+            ));
+        }
+        Some(rows)
     }
 
     fn tool_call_summary_rows(&self, appearance: &Appearance) -> Vec<LabelValueRow> {
@@ -681,16 +701,13 @@ impl TurnUsageView {
         let (inference_usage_label, inference_usage_value) =
             self.inference_usage_header_row(appearance);
         push_row(inference_usage_label, inference_usage_value, 8.);
-        push_section_rows(self.model_usage_rows(appearance), &mut push_row);
+        push_section_rows(
+            self.model_usage_rows(appearance, usage_display_unit),
+            &mut push_row,
+        );
 
-        if let Some((label, value)) = self.platform_usage_row(appearance) {
-            push_row(label, value, ROW_MARGIN_BOTTOM + SECTION_END_EXTRA_MARGIN);
-        }
-
-        if usage_display_unit == UsageDisplayUnit::Credits
-            && let Some((label, value)) = self.credits_section_row(appearance)
-        {
-            push_row(label, value, ROW_MARGIN_BOTTOM + SECTION_END_EXTRA_MARGIN);
+        if let Some(rows) = self.platform_usage_rows(appearance, usage_display_unit) {
+            push_section_rows(rows, &mut push_row);
         }
 
         let (context_window_label, context_window_value) =

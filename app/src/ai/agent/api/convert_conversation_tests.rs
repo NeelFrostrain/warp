@@ -29,6 +29,7 @@ fn test_server_metadata(
             platform_credits_spent: 0.0,
             total_provider_cost_in_cents: Some(3.2),
             credits_spent_for_last_block: None,
+            platform_credits_spent_for_last_block: None,
             platform_usage_in_cents_for_last_block: None,
             charged_usage_for_last_block: None,
             total_charged_usage: None,
