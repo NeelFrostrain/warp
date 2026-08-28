@@ -254,6 +254,31 @@ impl NotebooksEditorModel {
         self.render_state.as_ref(ctx).markdown_table_count()
     }
 
+    #[cfg(feature = "integration_tests")]
+    pub(crate) fn nested_shell_command_count(&self, ctx: &AppContext) -> usize {
+        self.child_models
+            .model_handles::<NotebookCommand>()
+            .filter(|handle| {
+                matches!(
+                    handle.as_ref(ctx).code_block_type(ctx),
+                    CodeBlockType::Shell
+                )
+            })
+            .count()
+    }
+
+    #[cfg(feature = "integration_tests")]
+    pub(crate) fn nested_rendered_mermaid_command_count(&self, ctx: &AppContext) -> usize {
+        self.child_models
+            .model_handles::<NotebookCommand>()
+            .filter(|handle| {
+                let command = handle.as_ref(ctx);
+                matches!(command.code_block_type(ctx), CodeBlockType::Mermaid)
+                    && matches!(command.mermaid_display_mode, MarkdownDisplayMode::Rendered)
+            })
+            .count()
+    }
+
     pub fn set_interaction_state(
         &mut self,
         new_state: InteractionState,
@@ -350,7 +375,9 @@ impl NotebooksEditorModel {
                 // When a debounced resize event fires, the model is laid out from scratch, using [`Self::rebuild_layout`].
                 let _ = self.resize_tx.try_send(());
             }
-            RenderEvent::LayoutUpdated => {
+            // Lazy first layout flushes queued restore edits as `PendingEditsFlushed` rather than
+            // `LayoutUpdated`; both still need child models and Mermaid render offsets.
+            RenderEvent::LayoutUpdated | RenderEvent::PendingEditsFlushed => {
                 self.child_models.update(
                     self.interaction_state.clone(),
                     self.content.clone(),
@@ -363,7 +390,7 @@ impl NotebooksEditorModel {
                     self.rebuild_layout(ctx);
                 }
             }
-            _ => (),
+            RenderEvent::ViewportUpdated(_) => {}
         }
     }
 

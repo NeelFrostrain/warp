@@ -153,7 +153,7 @@ fn viewed_ai_document(app: &App, window_id: WindowId) -> ViewHandle<AIDocumentVi
     views.into_iter().next().unwrap()
 }
 
-pub fn assert_viewed_ai_document_has_command_selection() -> AssertionCallback {
+pub fn assert_viewed_ai_document_has_code_and_mermaid_controls() -> AssertionCallback {
     Box::new(|app, window_id| {
         let view = viewed_ai_document(app, window_id);
         let (document_id, version) = view.read(app, |view, _| {
@@ -165,12 +165,19 @@ pub fn assert_viewed_ai_document_has_command_selection() -> AssertionCallback {
                 .expect("viewed document should exist")
                 .get_editor()
         });
-        editor.update(app, |editor, ctx| {
-            editor.select_command_down(ctx);
+        let (shell_count, mermaid_count, mermaid_offsets) = editor.read(app, |editor, ctx| {
+            (
+                editor.nested_shell_command_count(ctx),
+                editor.nested_rendered_mermaid_command_count(ctx),
+                editor
+                    .render_state()
+                    .as_ref(ctx)
+                    .layout_options()
+                    .mermaid_render_offsets
+                    .len(),
+            )
         });
-        let has_command_selection =
-            editor.read(app, |editor, ctx| editor.has_command_selection(ctx));
-        async_assert!(has_command_selection)
+        async_assert!(shell_count == 1 && mermaid_count == 1 && mermaid_offsets == 1)
     })
 }
 

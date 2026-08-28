@@ -291,8 +291,7 @@ impl NotebookCommand {
         self.start.clone()
     }
 
-    // Returns the CodeBlockType of this command
-    fn code_block_type(&self, ctx: &AppContext) -> CodeBlockType {
+    pub(crate) fn code_block_type(&self, ctx: &AppContext) -> CodeBlockType {
         if let Some(offset) = self.end_offset(ctx) {
             NotebookCommand::block_type_to_code_type(
                 self.content.as_ref(ctx).block_type_at_point(offset),

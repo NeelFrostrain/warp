@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use warp::integration_testing::ai_document::{
     ai_document_overflow_button_position_id, assert_ai_document_overflow_button_position_exists,
-    assert_viewed_ai_document_has_command_selection, create_and_open_ai_document,
+    assert_viewed_ai_document_has_code_and_mermaid_controls, create_and_open_ai_document,
     restore_and_open_ai_document, select_initial_ai_document_version,
 };
 use warp::integration_testing::clipboard::assert_clipboard_contains_string;
@@ -58,17 +58,17 @@ pub fn test_restored_ai_document_populates_code_block_after_first_layout() -> Bu
         )
         .with_step(
             new_step_with_default_assertions(
-                "Current restored version has a code-block control after first layout",
+                "Current restored version has code and rendered Mermaid controls after first layout",
             )
             .set_timeout(Duration::from_secs(10))
-            .add_assertion(assert_viewed_ai_document_has_command_selection()),
+            .add_assertion(assert_viewed_ai_document_has_code_and_mermaid_controls()),
         )
         .with_step(select_initial_ai_document_version())
         .with_step(
             new_step_with_default_assertions(
-                "Earlier restored version has a code-block control after first layout",
+                "Earlier restored version has code and rendered Mermaid controls after first layout",
             )
             .set_timeout(Duration::from_secs(10))
-            .add_assertion(assert_viewed_ai_document_has_command_selection()),
+            .add_assertion(assert_viewed_ai_document_has_code_and_mermaid_controls()),
         )
 }
