@@ -77,6 +77,7 @@ impl AIQueryRouting {
                 ..
             } => Some(CloudRoutingIndicator::LiveSession),
             Self::NewCloudVm { .. } => Some(CloudRoutingIndicator::NewCloudVm),
+            // Shared *local* session viewers (no ambient task) and non-live panes show no indicator.
             Self::LiveRemoteVm {
                 ambient_agent_task_id: None,
                 ..
