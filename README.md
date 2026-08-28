@@ -47,7 +47,9 @@ Explore [build.warp.dev](https://build.warp.dev) to:
 
 ## Automate development with Warp Factories
 
-[Request early access](https://www.warp.dev/factories/request-access) to Warp Factories — open infrastructure for cloud software factories, defined in code, built for scale, and easy to deploy on any model or harness, with evals, benchmarks, and self-improvement built in. Learn more at [warp.dev/factories](https://www.warp.dev/factories).
+[Request early access to Warp Factories:](https://www.warp.dev/factories/request-access) open, flexible infrastructure for teams to build cloud software factories of their own.
+
+Warp Factories are defined in code and easy to deploy on any model or harness, with evals, benchmarks, and self-improvement built in. Learn more at [warp.dev/factories](https://www.warp.dev/factories).
 
 ## Licensing
 
