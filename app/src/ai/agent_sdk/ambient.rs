@@ -17,6 +17,7 @@ use warp_cli::task::{
 use warp_cli::{GlobalOptions, SortOrderArg};
 use warp_core::channel::ChannelState;
 use warp_core::features::FeatureFlag;
+use warp_server_client::HttpStatusError;
 use warpui::r#async::{Spawnable, Timer};
 use warpui::platform::TerminationMode;
 use warpui::{AppContext, ModelContext, SingletonEntity};
@@ -50,6 +51,17 @@ use crate::workspaces::user_workspaces::UserWorkspaces;
 
 const MAX_LINE_WIDTH: usize = 90;
 const STREAM_RETRY_BACKOFF_STEPS: &[u64] = &[1, 2, 5, 10];
+const HTTP_UNPROCESSABLE_ENTITY: u16 = 422;
+#[cfg(not(target_family = "wasm"))]
+const HTTP_NOT_FOUND: u16 = 404;
+const OPERATION_NOT_SUPPORTED: &str = "operation_not_supported";
+const NORMALIZED_CONVERSATION_UNSUPPORTED_TITLE: &str =
+    "normalized conversations are only supported for Warp-native transcripts";
+const THIRD_PARTY_CONVERSATION_ID_HINT: &str = concat!(
+    "Normalized conversations are only supported for Warp-native transcripts. ",
+    "For third-party harness runs, use `oz run get <run_id> --conversation` ",
+    "to print the raw transcript.",
+);
 
 /// Singleton model that runs async work for ambient agent CLI commands.
 struct AmbientAgentRunner;
@@ -1425,6 +1437,127 @@ pub fn get_run_conversation(ctx: &mut AppContext, run_id: String) -> anyhow::Res
     runner.update(ctx, |runner, ctx| runner.get_run_conversation(run_id, ctx))
 }
 
+/// Normalized Warp conversation JSON, or a raw third-party harness transcript.
+#[derive(Debug, PartialEq)]
+enum ConversationCliOutput {
+    Normalized(serde_json::Value),
+    RawTranscript(Vec<u8>),
+}
+
+async fn load_run_conversation(
+    ai_client: &dyn AIClient,
+    run_id: &str,
+) -> anyhow::Result<ConversationCliOutput> {
+    match ai_client.get_run_conversation(run_id).await {
+        Ok(conversation) => Ok(ConversationCliOutput::Normalized(conversation)),
+        Err(err) => {
+            #[cfg(not(target_family = "wasm"))]
+            if is_normalized_conversation_unsupported(&err) {
+                return download_raw_run_transcript(ai_client, run_id)
+                    .await
+                    .map(ConversationCliOutput::RawTranscript);
+            }
+            Err(err)
+        }
+    }
+}
+
+async fn load_public_conversation(
+    ai_client: &dyn AIClient,
+    conversation_id: &str,
+) -> anyhow::Result<ConversationCliOutput> {
+    match ai_client.get_public_conversation(conversation_id).await {
+        Ok(conversation) => Ok(ConversationCliOutput::Normalized(conversation)),
+        Err(err) if is_normalized_conversation_unsupported(&err) => {
+            Err(err.context(THIRD_PARTY_CONVERSATION_ID_HINT))
+        }
+        Err(err) => Err(err),
+    }
+}
+
+#[cfg(not(target_family = "wasm"))]
+async fn download_raw_run_transcript(
+    ai_client: &dyn AIClient,
+    run_id: &str,
+) -> anyhow::Result<Vec<u8>> {
+    let task_id = parse_ambient_task_id(run_id, "Invalid run ID")?;
+    let transcript_file = tempfile::Builder::new()
+        .prefix("warp_run_transcript_")
+        .suffix(".json")
+        .tempfile()
+        .context("Failed to create temporary transcript file")?;
+    let transcript_path = transcript_file.path().to_path_buf();
+    if let Err(err) = ai_client
+        .download_run_transcript_to_path(&task_id, &transcript_path)
+        .await
+    {
+        if is_http_status(&err, HTTP_NOT_FOUND) {
+            return Err(anyhow!(
+                "Raw transcript not found for run {run_id}. It may not have been uploaded yet."
+            ));
+        }
+        return Err(err.context(format!(
+            "Failed to download raw transcript for run {run_id}"
+        )));
+    }
+    std::fs::read(&transcript_path).with_context(|| {
+        format!(
+            "Failed to read downloaded transcript '{}'",
+            transcript_path.display()
+        )
+    })
+}
+
+fn is_normalized_conversation_unsupported(err: &anyhow::Error) -> bool {
+    err.chain().any(|cause| {
+        let Some(status_error) = cause.downcast_ref::<HttpStatusError>() else {
+            return false;
+        };
+        if status_error.status != HTTP_UNPROCESSABLE_ENTITY {
+            return false;
+        }
+        status_error.body.contains(OPERATION_NOT_SUPPORTED)
+            || status_error
+                .body
+                .contains(NORMALIZED_CONVERSATION_UNSUPPORTED_TITLE)
+    })
+}
+
+#[cfg(not(target_family = "wasm"))]
+fn is_http_status(err: &anyhow::Error, status: u16) -> bool {
+    err.chain().any(|cause| {
+        cause
+            .downcast_ref::<HttpStatusError>()
+            .is_some_and(|status_error| status_error.status == status)
+    })
+}
+
+fn print_conversation_cli_output(output: &ConversationCliOutput) -> anyhow::Result<()> {
+    write_conversation_cli_output(output, std::io::stdout())
+}
+
+fn write_conversation_cli_output<W>(
+    output: &ConversationCliOutput,
+    mut writer: W,
+) -> anyhow::Result<()>
+where
+    W: std::io::Write,
+{
+    match output {
+        ConversationCliOutput::Normalized(conversation) => {
+            let pretty = serde_json::to_string_pretty(conversation)?;
+            writeln!(writer, "{pretty}")?;
+        }
+        ConversationCliOutput::RawTranscript(bytes) => {
+            writer.write_all(bytes)?;
+            if !bytes.ends_with(b"\n") {
+                writeln!(writer)?;
+            }
+        }
+    }
+    Ok(())
+}
+
 impl AmbientAgentRunner {
     fn get_conversation(
         &self,
@@ -1434,9 +1567,8 @@ impl AmbientAgentRunner {
         let ai_client = ServerApiProvider::as_ref(ctx).get_ai_client();
 
         let future = async move {
-            let conversation = ai_client.get_public_conversation(&conversation_id).await?;
-            let pretty = serde_json::to_string_pretty(&conversation)?;
-            println!("{pretty}");
+            let output = load_public_conversation(ai_client.as_ref(), &conversation_id).await?;
+            print_conversation_cli_output(&output)?;
             Ok(())
         };
         self.spawn_command(future, ctx);
@@ -1452,9 +1584,8 @@ impl AmbientAgentRunner {
         let ai_client = ServerApiProvider::as_ref(ctx).get_ai_client();
 
         let future = async move {
-            let conversation = ai_client.get_run_conversation(&run_id).await?;
-            let pretty = serde_json::to_string_pretty(&conversation)?;
-            println!("{pretty}");
+            let output = load_run_conversation(ai_client.as_ref(), &run_id).await?;
+            print_conversation_cli_output(&output)?;
             Ok(())
         };
         self.spawn_command(future, ctx);
