@@ -258,12 +258,7 @@ impl NotebooksEditorModel {
     pub(crate) fn nested_shell_command_count(&self, ctx: &AppContext) -> usize {
         self.child_models
             .model_handles::<NotebookCommand>()
-            .filter(|handle| {
-                matches!(
-                    handle.as_ref(ctx).code_block_type(ctx),
-                    CodeBlockType::Shell
-                )
-            })
+            .filter(|handle| handle.as_ref(ctx).is_shell_command(ctx))
             .count()
     }
 
@@ -271,11 +266,7 @@ impl NotebooksEditorModel {
     pub(crate) fn nested_rendered_mermaid_command_count(&self, ctx: &AppContext) -> usize {
         self.child_models
             .model_handles::<NotebookCommand>()
-            .filter(|handle| {
-                let command = handle.as_ref(ctx);
-                matches!(command.code_block_type(ctx), CodeBlockType::Mermaid)
-                    && matches!(command.mermaid_display_mode, MarkdownDisplayMode::Rendered)
-            })
+            .filter(|handle| handle.as_ref(ctx).is_rendered_mermaid(ctx))
             .count()
     }
 
@@ -437,14 +428,9 @@ impl NotebooksEditorModel {
             .child_models
             .model_handles::<NotebookCommand>()
             .filter_map(|handle| {
-                if matches!(
-                    handle.as_ref(ctx).mermaid_display_mode,
-                    MarkdownDisplayMode::Rendered
-                ) {
-                    handle
-                        .as_ref(ctx)
-                        .start_offset(ctx)
-                        .map(|o| o + CharOffset::from(1))
+                let command = handle.as_ref(ctx);
+                if command.is_rendered_mermaid(ctx) {
+                    command.start_offset(ctx).map(|o| o + CharOffset::from(1))
                 } else {
                     None
                 }
