@@ -970,6 +970,7 @@ impl AIDocumentModel {
                 AIConversationId::new(),
                 None,
                 Local::now(),
+                // Restored plans are often never opened; skip font shaping until first display.
                 LayoutTiming::Lazy,
                 ctx,
             );
@@ -1140,6 +1141,7 @@ impl AIDocumentModel {
             conversation_id,
             None,
             created_at,
+            // Conversation restore replays every revision, including ones never opened.
             LayoutTiming::Lazy,
             ctx,
         );
