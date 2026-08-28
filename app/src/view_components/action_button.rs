@@ -414,21 +414,6 @@ impl ActionButton {
         self.disabled
     }
 
-    #[cfg(test)]
-    pub fn icon(&self) -> Option<Icon> {
-        self.icon
-    }
-
-    #[cfg(test)]
-    pub fn icon_ansi_color(&self) -> Option<AnsiColorIdentifier> {
-        self.icon_ansi_color
-    }
-
-    #[cfg(test)]
-    pub fn tooltip(&self) -> Option<&str> {
-        self.tooltip.as_deref()
-    }
-
     /// Returns the height of the button.
     pub fn height(&self, app: &AppContext) -> f32 {
         let appearance = Appearance::as_ref(app);

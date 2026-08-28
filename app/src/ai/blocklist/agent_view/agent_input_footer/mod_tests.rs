@@ -1,6 +1,5 @@
 use chrono::Utc;
 use persistence::model::ConversationUsageMetadata;
-use warp_core::ui::theme::AnsiColorIdentifier;
 use warpui::{App, SingletonEntity};
 
 use super::*;
@@ -63,15 +62,16 @@ fn start_cli_session(
     });
 }
 
-fn footer_indicator(
+fn rendered_cli_footer_child_ids(
     view: &crate::terminal::TerminalView,
     ctx: &AppContext,
-) -> Option<(Icon, Option<AnsiColorIdentifier>, String)> {
-    view.input()
-        .as_ref(ctx)
-        .agent_input_footer()
-        .as_ref(ctx)
-        .rendered_cli_cloud_indicator(ctx)
+) -> Vec<EntityId> {
+    let footer = view.input().as_ref(ctx).agent_input_footer().as_ref(ctx);
+    assert!(
+        footer.is_cli_agent_session_active(ctx),
+        "CLI session must be active so render uses the CLI footer",
+    );
+    footer.render(ctx).debug_child_view_ids()
 }
 
 fn ambient_agent_task(
@@ -170,11 +170,18 @@ fn cli_footer_shows_live_indicator_for_third_party_cloud_session() {
                 .set_shared_session_status(SharedSessionStatus::executor());
             start_cli_session(view, ctx);
 
-            let (icon, ansi, tooltip) =
-                footer_indicator(view, ctx).expect("live cloud chip should render");
-            assert_eq!(icon, Icon::CloudFilled);
-            assert_eq!(ansi, None);
-            assert_eq!(tooltip, LIVE_REMOTE_VM_INDICATOR_TOOLTIP);
+            let footer = view.input().as_ref(ctx).agent_input_footer().as_ref(ctx);
+            let live_id = footer.live_session_indicator_id();
+            let new_vm_id = footer.new_cloud_vm_indicator_id();
+            let child_ids = rendered_cli_footer_child_ids(view, ctx);
+            assert!(
+                child_ids.contains(&live_id),
+                "CLI footer should embed the live-session indicator, got {child_ids:?}"
+            );
+            assert!(
+                !child_ids.contains(&new_vm_id),
+                "CLI footer should not embed the new-VM indicator, got {child_ids:?}"
+            );
         });
     });
 }
@@ -216,11 +223,18 @@ fn cli_footer_shows_new_vm_indicator_for_disconnected_third_party_cloud_session(
                 .set_shared_session_status(SharedSessionStatus::NotShared);
             start_cli_session(view, ctx);
 
-            let (icon, ansi, tooltip) =
-                footer_indicator(view, ctx).expect("new-VM chip should render");
-            assert_eq!(icon, Icon::CloudOffline);
-            assert_eq!(ansi, Some(AnsiColorIdentifier::Yellow));
-            assert_eq!(tooltip, NEW_CLOUD_VM_INDICATOR_TOOLTIP);
+            let footer = view.input().as_ref(ctx).agent_input_footer().as_ref(ctx);
+            let live_id = footer.live_session_indicator_id();
+            let new_vm_id = footer.new_cloud_vm_indicator_id();
+            let child_ids = rendered_cli_footer_child_ids(view, ctx);
+            assert!(
+                child_ids.contains(&new_vm_id),
+                "CLI footer should embed the new-VM indicator, got {child_ids:?}"
+            );
+            assert!(
+                !child_ids.contains(&live_id),
+                "CLI footer should not embed the live-session indicator, got {child_ids:?}"
+            );
         });
     });
 }
@@ -233,7 +247,14 @@ fn cli_footer_omits_cloud_indicator_for_local_cli_session() {
 
         terminal.update(&mut app, |view, ctx| {
             start_cli_session(view, ctx);
-            assert!(footer_indicator(view, ctx).is_none());
+            let footer = view.input().as_ref(ctx).agent_input_footer().as_ref(ctx);
+            let live_id = footer.live_session_indicator_id();
+            let new_vm_id = footer.new_cloud_vm_indicator_id();
+            let child_ids = rendered_cli_footer_child_ids(view, ctx);
+            assert!(
+                !child_ids.contains(&live_id) && !child_ids.contains(&new_vm_id),
+                "local CLI footer should omit both cloud indicators, got {child_ids:?}"
+            );
         });
     });
 }
@@ -249,7 +270,14 @@ fn cli_footer_omits_cloud_indicator_for_shared_local_viewer() {
                 .lock()
                 .set_shared_session_status(SharedSessionStatus::executor());
             start_cli_session(view, ctx);
-            assert!(footer_indicator(view, ctx).is_none());
+            let footer = view.input().as_ref(ctx).agent_input_footer().as_ref(ctx);
+            let live_id = footer.live_session_indicator_id();
+            let new_vm_id = footer.new_cloud_vm_indicator_id();
+            let child_ids = rendered_cli_footer_child_ids(view, ctx);
+            assert!(
+                !child_ids.contains(&live_id) && !child_ids.contains(&new_vm_id),
+                "shared local viewer CLI footer should omit both cloud indicators, got {child_ids:?}"
+            );
         });
     });
 }
