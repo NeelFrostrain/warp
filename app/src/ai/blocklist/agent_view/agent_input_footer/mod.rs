@@ -2332,6 +2332,39 @@ impl AgentInputFooter {
             .map(|chip| chip.as_ref(app).chip_kind().clone())
             .collect()
     }
+
+    /// Renders the CLI footer and returns the live/new-VM chip that path would insert.
+    #[cfg(test)]
+    pub fn rendered_cli_cloud_indicator(
+        &self,
+        app: &AppContext,
+    ) -> Option<(Icon, Option<AnsiColorIdentifier>, String)> {
+        assert!(
+            self.is_cli_agent_session_active(app),
+            "CLI session must be active so render uses the CLI footer",
+        );
+        let _ = self.render(app);
+        let terminal_model = self.terminal_model.lock();
+        let indicator = resolve_ai_query_routing(
+            self.terminal_view_id,
+            self.ambient_agent_view_model.as_ref(),
+            &terminal_model,
+            app,
+        )
+        .cloud_routing_indicator()?;
+        let button = match indicator {
+            CloudRoutingIndicator::LiveSession => self.live_session_indicator.as_ref(app),
+            CloudRoutingIndicator::NewCloudVm => self.new_cloud_vm_indicator.as_ref(app),
+        };
+        Some((
+            button.icon().expect("cloud indicator has an icon"),
+            button.icon_ansi_color(),
+            button
+                .tooltip()
+                .expect("cloud indicator has a tooltip")
+                .to_owned(),
+        ))
+    }
 }
 
 impl View for AgentInputFooter {
@@ -2994,3 +3027,7 @@ impl ActionButtonTheme for NLDButtonTheme {
         true
     }
 }
+
+#[cfg(test)]
+#[path = "mod_tests.rs"]
+mod tests;
