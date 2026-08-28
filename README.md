@@ -40,7 +40,7 @@ You can [download Warp](https://www.warp.dev/download) and [read our docs](https
 ## Warp Contributions Overview Dashboard
 
 Explore [build.warp.dev](https://build.warp.dev) to:
-- Watch thousands of Warp Factory agents triage issues, write specs, implement changes, and review PRs
+- Watch thousands of [Warp Factory](warp.dev/factories) agents triage issues, write specs, implement changes, and review PRs
 - View top contributors and in-flight features
 - Track your own issues with GitHub sign-in
 - Click into active agent sessions in a web-compiled Warp terminal
