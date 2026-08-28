@@ -386,7 +386,8 @@ async fn load_public_conversation_returns_normalized_json() {
             Ok(conversation.clone())
         }
     });
-    mock.expect_download_run_transcript_to_path().times(0);
+    mock.expect_download_conversation_transcript_to_path()
+        .times(0);
 
     let output = load_public_conversation(&mock, "conv-native")
         .await
@@ -396,16 +397,70 @@ async fn load_public_conversation_returns_normalized_json() {
 }
 
 #[tokio::test]
-async fn load_public_conversation_directs_third_party_users_to_run_get() {
+async fn load_public_conversation_falls_back_to_raw_transcript_for_third_party_harness() {
+    const RAW_TRANSCRIPT: &[u8] = b"{\"type\":\"claude_code\"}\n";
     let mut mock = MockAIClient::new();
     mock.expect_get_public_conversation()
         .times(1)
         .returning(|_| Err(operation_not_supported_error()));
-    mock.expect_download_run_transcript_to_path().times(0);
+    mock.expect_download_conversation_transcript_to_path()
+        .times(1)
+        .returning(|conversation_id, path| {
+            assert_eq!(conversation_id, "conv-third-party");
+            std::fs::write(path, RAW_TRANSCRIPT).unwrap();
+            Ok(())
+        });
+
+    let output = load_public_conversation(&mock, "conv-third-party")
+        .await
+        .unwrap();
+
+    assert_eq!(
+        output,
+        ConversationCliOutput::RawTranscript(RAW_TRANSCRIPT.to_vec())
+    );
+}
+
+#[tokio::test]
+async fn load_public_conversation_preserves_unrelated_422() {
+    let mut mock = MockAIClient::new();
+    mock.expect_get_public_conversation()
+        .times(1)
+        .returning(|_| Err(http_error(422, r#"{"error":"validation failed"}"#)));
+    mock.expect_download_conversation_transcript_to_path()
+        .times(0);
 
     let err = load_public_conversation(&mock, "conv-third-party")
         .await
         .unwrap_err();
 
-    assert_eq!(err.to_string(), THIRD_PARTY_CONVERSATION_ID_HINT);
+    assert!(
+        err.to_string()
+            .contains("API request failed with status 422")
+    );
+}
+
+#[tokio::test]
+async fn load_public_conversation_reports_missing_raw_transcript() {
+    let mut mock = MockAIClient::new();
+    mock.expect_get_public_conversation()
+        .times(1)
+        .returning(|_| Err(operation_not_supported_error()));
+    mock.expect_download_conversation_transcript_to_path()
+        .times(1)
+        .returning(|_, _| {
+            Err(http_error(
+                404,
+                r#"{"type":"https://docs.warp.dev/errors/resource_not_found","title":"no transcript path in manifest"}"#,
+            ))
+        });
+
+    let err = load_public_conversation(&mock, "conv-third-party")
+        .await
+        .unwrap_err();
+
+    assert_eq!(
+        err.to_string(),
+        "Raw transcript not found for conversation conv-third-party. It may not have been uploaded yet."
+    );
 }

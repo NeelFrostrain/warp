@@ -1312,6 +1312,13 @@ pub trait AIClient: 'static + Send + Sync {
         destination: &Path,
     ) -> anyhow::Result<(), anyhow::Error>;
 
+    #[cfg(not(target_family = "wasm"))]
+    async fn download_conversation_transcript_to_path(
+        &self,
+        conversation_id: &str,
+        destination: &Path,
+    ) -> anyhow::Result<(), anyhow::Error>;
+
     async fn submit_run_followup(
         &self,
         run_id: &AmbientAgentTaskId,
@@ -2896,6 +2903,18 @@ impl AIClient for ServerApi {
     ) -> anyhow::Result<(), anyhow::Error> {
         let response = self
             .get_public_api_response(&format!("agent/runs/{run_id}/transcript"))
+            .await?;
+        write_response_body_to_path(response, destination).await
+    }
+
+    #[cfg(not(target_family = "wasm"))]
+    async fn download_conversation_transcript_to_path(
+        &self,
+        conversation_id: &str,
+        destination: &Path,
+    ) -> anyhow::Result<(), anyhow::Error> {
+        let response = self
+            .get_public_api_response(&format!("agent/conversations/{conversation_id}/transcript"))
             .await?;
         write_response_body_to_path(response, destination).await
     }

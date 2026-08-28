@@ -57,11 +57,6 @@ const HTTP_NOT_FOUND: u16 = 404;
 const OPERATION_NOT_SUPPORTED: &str = "operation_not_supported";
 const NORMALIZED_CONVERSATION_UNSUPPORTED_TITLE: &str =
     "normalized conversations are only supported for Warp-native transcripts";
-const THIRD_PARTY_CONVERSATION_ID_HINT: &str = concat!(
-    "Normalized conversations are only supported for Warp-native transcripts. ",
-    "For third-party harness runs, use `oz run get <run_id> --conversation` ",
-    "to print the raw transcript.",
-);
 
 /// Singleton model that runs async work for ambient agent CLI commands.
 struct AmbientAgentRunner;
@@ -1468,10 +1463,15 @@ async fn load_public_conversation(
 ) -> anyhow::Result<ConversationCliOutput> {
     match ai_client.get_public_conversation(conversation_id).await {
         Ok(conversation) => Ok(ConversationCliOutput::Normalized(conversation)),
-        Err(err) if is_normalized_conversation_unsupported(&err) => {
-            Err(err.context(THIRD_PARTY_CONVERSATION_ID_HINT))
+        Err(err) => {
+            #[cfg(not(target_family = "wasm"))]
+            if is_normalized_conversation_unsupported(&err) {
+                return download_raw_conversation_transcript(ai_client, conversation_id)
+                    .await
+                    .map(ConversationCliOutput::RawTranscript);
+            }
+            Err(err)
         }
-        Err(err) => Err(err),
     }
 }
 
@@ -1487,23 +1487,54 @@ async fn download_raw_run_transcript(
         .tempfile()
         .context("Failed to create temporary transcript file")?;
     let transcript_path = transcript_file.path().to_path_buf();
-    if let Err(err) = ai_client
-        .download_run_transcript_to_path(&task_id, &transcript_path)
-        .await
-    {
+    download_raw_transcript(
+        ai_client.download_run_transcript_to_path(&task_id, &transcript_path),
+        &transcript_path,
+        format!("Raw transcript not found for run {run_id}. It may not have been uploaded yet."),
+        format!("Failed to download raw transcript for run {run_id}"),
+    )
+    .await
+}
+
+#[cfg(not(target_family = "wasm"))]
+async fn download_raw_conversation_transcript(
+    ai_client: &dyn AIClient,
+    conversation_id: &str,
+) -> anyhow::Result<Vec<u8>> {
+    let transcript_file = tempfile::Builder::new()
+        .prefix("warp_conversation_transcript_")
+        .suffix(".json")
+        .tempfile()
+        .context("Failed to create temporary transcript file")?;
+    let transcript_path = transcript_file.path().to_path_buf();
+    download_raw_transcript(
+        ai_client.download_conversation_transcript_to_path(conversation_id, &transcript_path),
+        &transcript_path,
+        format!(
+            "Raw transcript not found for conversation {conversation_id}. It may not have been uploaded yet."
+        ),
+        format!("Failed to download raw transcript for conversation {conversation_id}"),
+    )
+    .await
+}
+
+#[cfg(not(target_family = "wasm"))]
+async fn download_raw_transcript(
+    download: impl std::future::Future<Output = anyhow::Result<()>>,
+    destination: &std::path::Path,
+    not_found_message: String,
+    failure_context: String,
+) -> anyhow::Result<Vec<u8>> {
+    if let Err(err) = download.await {
         if is_http_status(&err, HTTP_NOT_FOUND) {
-            return Err(anyhow!(
-                "Raw transcript not found for run {run_id}. It may not have been uploaded yet."
-            ));
+            return Err(anyhow!(not_found_message));
         }
-        return Err(err.context(format!(
-            "Failed to download raw transcript for run {run_id}"
-        )));
+        return Err(err.context(failure_context));
     }
-    std::fs::read(&transcript_path).with_context(|| {
+    std::fs::read(destination).with_context(|| {
         format!(
             "Failed to read downloaded transcript '{}'",
-            transcript_path.display()
+            destination.display()
         )
     })
 }
