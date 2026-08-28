@@ -246,25 +246,80 @@ fn native_conversation() -> serde_json::Value {
 }
 
 #[test]
-fn normalized_conversation_unsupported_matches_422_operation_not_supported() {
+fn normalized_conversation_unsupported_matches_rfc7807_type_and_title() {
     assert!(is_normalized_conversation_unsupported(
         &operation_not_supported_error()
     ));
-    assert!(is_normalized_conversation_unsupported(&http_error(
+}
+
+#[test]
+fn normalized_conversation_unsupported_rejects_title_only_rfc7807() {
+    assert!(!is_normalized_conversation_unsupported(&http_error(
         422,
         r#"{"title":"normalized conversations are only supported for Warp-native transcripts"}"#,
+    )));
+}
+
+#[test]
+fn normalized_conversation_unsupported_rejects_arbitrary_substrings() {
+    assert!(!is_normalized_conversation_unsupported(&http_error(
+        422,
+        "https://docs.warp.dev/errors/operation_not_supported normalized conversations are only supported for Warp-native transcripts",
     )));
     assert!(!is_normalized_conversation_unsupported(&http_error(
         422,
         r#"{"error":"validation failed"}"#,
     )));
-    assert!(!is_normalized_conversation_unsupported(&http_error(
-        404,
-        r#"{"type":"https://docs.warp.dev/errors/operation_not_supported"}"#,
-    )));
     assert!(!is_normalized_conversation_unsupported(&anyhow::anyhow!(
         "operation_not_supported"
     )));
+}
+
+#[test]
+fn normalized_conversation_unsupported_rejects_matching_type_with_different_title() {
+    assert!(!is_normalized_conversation_unsupported(&http_error(
+        422,
+        r#"{"type":"https://docs.warp.dev/errors/operation_not_supported","title":"forking is not supported"}"#,
+    )));
+}
+
+#[test]
+fn normalized_conversation_unsupported_rejects_non_422_status() {
+    assert!(!is_normalized_conversation_unsupported(&http_error(
+        404,
+        r#"{"type":"https://docs.warp.dev/errors/operation_not_supported","title":"normalized conversations are only supported for Warp-native transcripts"}"#,
+    )));
+}
+
+#[test]
+fn write_conversation_cli_output_pretty_prints_normalized_json() {
+    let mut buf = Vec::new();
+    write_conversation_cli_output(
+        &ConversationCliOutput::Normalized(serde_json::json!({"conversation_id": "c-1"})),
+        &mut buf,
+    )
+    .unwrap();
+
+    assert_eq!(buf, b"{\n  \"conversation_id\": \"c-1\"\n}\n");
+}
+
+#[test]
+fn write_conversation_cli_output_writes_raw_transcript_bytes_exactly() {
+    let mut without_newline = Vec::new();
+    write_conversation_cli_output(
+        &ConversationCliOutput::RawTranscript(b"no trailing newline".to_vec()),
+        &mut without_newline,
+    )
+    .unwrap();
+    assert_eq!(without_newline, b"no trailing newline");
+
+    let mut non_utf8 = Vec::new();
+    write_conversation_cli_output(
+        &ConversationCliOutput::RawTranscript(vec![0xff, 0xfe, 0x00, b'x']),
+        &mut non_utf8,
+    )
+    .unwrap();
+    assert_eq!(non_utf8, vec![0xff, 0xfe, 0x00, b'x']);
 }
 
 #[tokio::test]

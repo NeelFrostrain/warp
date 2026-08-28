@@ -6,7 +6,7 @@ use std::time::Duration;
 use anyhow::{Context as _, anyhow};
 use comfy_table::Cell;
 use futures::{StreamExt, future};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use warp_cli::agent::{Harness, OutputFormat, Prompt, RunCloudArgs};
 use warp_cli::json_filter::JsonOutput;
 use warp_cli::task::{
@@ -54,7 +54,8 @@ const STREAM_RETRY_BACKOFF_STEPS: &[u64] = &[1, 2, 5, 10];
 const HTTP_UNPROCESSABLE_ENTITY: u16 = 422;
 #[cfg(not(target_family = "wasm"))]
 const HTTP_NOT_FOUND: u16 = 404;
-const OPERATION_NOT_SUPPORTED: &str = "operation_not_supported";
+const OPERATION_NOT_SUPPORTED_TYPE_URI: &str =
+    "https://docs.warp.dev/errors/operation_not_supported";
 const NORMALIZED_CONVERSATION_UNSUPPORTED_TITLE: &str =
     "normalized conversations are only supported for Warp-native transcripts";
 
@@ -1539,6 +1540,14 @@ async fn download_raw_transcript(
     })
 }
 
+#[derive(Deserialize)]
+struct Rfc7807Problem {
+    #[serde(default, rename = "type")]
+    problem_type: String,
+    #[serde(default)]
+    title: String,
+}
+
 fn is_normalized_conversation_unsupported(err: &anyhow::Error) -> bool {
     err.chain().any(|cause| {
         let Some(status_error) = cause.downcast_ref::<HttpStatusError>() else {
@@ -1547,10 +1556,11 @@ fn is_normalized_conversation_unsupported(err: &anyhow::Error) -> bool {
         if status_error.status != HTTP_UNPROCESSABLE_ENTITY {
             return false;
         }
-        status_error.body.contains(OPERATION_NOT_SUPPORTED)
-            || status_error
-                .body
-                .contains(NORMALIZED_CONVERSATION_UNSUPPORTED_TITLE)
+        let Ok(problem) = serde_json::from_str::<Rfc7807Problem>(&status_error.body) else {
+            return false;
+        };
+        problem.problem_type == OPERATION_NOT_SUPPORTED_TYPE_URI
+            && problem.title == NORMALIZED_CONVERSATION_UNSUPPORTED_TITLE
     })
 }
 
@@ -1581,9 +1591,6 @@ where
         }
         ConversationCliOutput::RawTranscript(bytes) => {
             writer.write_all(bytes)?;
-            if !bytes.ends_with(b"\n") {
-                writeln!(writer)?;
-            }
         }
     }
     Ok(())
