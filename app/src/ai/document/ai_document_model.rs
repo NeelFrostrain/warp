@@ -564,8 +564,9 @@ impl AIDocumentModel {
             conversation_id,
             file_link_resolution_context,
             Local::now(),
-            // Hydrated in response to a user opening the plan, so it is about to be displayed.
-            LayoutTiming::Eager,
+            // Agent-context hydration does not open a document view, so skip font shaping until
+            // a view actually renders it.
+            LayoutTiming::Lazy,
             ctx,
         );
 
@@ -681,6 +682,8 @@ impl AIDocumentModel {
     ///
     /// This is keyed by (conversation_id, action_id, document_index) so that streaming updates
     /// for the same tool call map to the same document.
+    ///
+    /// `will_auto_open` is true when the caller is about to open this document's pane.
     pub fn get_or_create_streaming_document_for_create_documents(
         &mut self,
         conversation_id: AIConversationId,
@@ -689,6 +692,7 @@ impl AIDocumentModel {
         title: impl Into<String>,
         initial_content: impl Into<String>,
         file_link_resolution_context: Option<FileLinkResolutionContext>,
+        will_auto_open: bool,
         ctx: &mut ModelContext<Self>,
     ) -> (AIDocumentId, bool) {
         let key = (conversation_id, action_id.clone(), document_index);
@@ -705,8 +709,12 @@ impl AIDocumentModel {
             conversation_id,
             file_link_resolution_context,
             Local::now(),
-            // Streaming plans auto-open their pane, so this content is about to be displayed.
-            LayoutTiming::Eager,
+            // The caller auto-opens only the first newly created streaming document.
+            if will_auto_open {
+                LayoutTiming::Eager
+            } else {
+                LayoutTiming::Lazy
+            },
             ctx,
         );
         self.streaming_create_documents.insert(key, id);
