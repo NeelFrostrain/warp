@@ -1306,11 +1306,23 @@ pub trait AIClient: 'static + Send + Sync {
     ) -> anyhow::Result<serde_json::Value, anyhow::Error>;
 
     #[cfg(not(target_family = "wasm"))]
+    async fn download_run_transcript(
+        &self,
+        run_id: &AmbientAgentTaskId,
+    ) -> anyhow::Result<Vec<u8>, anyhow::Error>;
+
+    #[cfg(not(target_family = "wasm"))]
     async fn download_run_transcript_to_path(
         &self,
         run_id: &AmbientAgentTaskId,
         destination: &Path,
     ) -> anyhow::Result<(), anyhow::Error>;
+
+    #[cfg(not(target_family = "wasm"))]
+    async fn download_conversation_transcript(
+        &self,
+        conversation_id: &str,
+    ) -> anyhow::Result<Vec<u8>, anyhow::Error>;
 
     #[cfg(not(target_family = "wasm"))]
     async fn download_conversation_transcript_to_path(
@@ -2896,6 +2908,17 @@ impl AIClient for ServerApi {
     }
 
     #[cfg(not(target_family = "wasm"))]
+    async fn download_run_transcript(
+        &self,
+        run_id: &AmbientAgentTaskId,
+    ) -> anyhow::Result<Vec<u8>, anyhow::Error> {
+        let response = self
+            .get_public_api_response(&format!("agent/runs/{run_id}/transcript"))
+            .await?;
+        Ok(response.bytes().await?.to_vec())
+    }
+
+    #[cfg(not(target_family = "wasm"))]
     async fn download_run_transcript_to_path(
         &self,
         run_id: &AmbientAgentTaskId,
@@ -2905,6 +2928,17 @@ impl AIClient for ServerApi {
             .get_public_api_response(&format!("agent/runs/{run_id}/transcript"))
             .await?;
         write_response_body_to_path(response, destination).await
+    }
+
+    #[cfg(not(target_family = "wasm"))]
+    async fn download_conversation_transcript(
+        &self,
+        conversation_id: &str,
+    ) -> anyhow::Result<Vec<u8>, anyhow::Error> {
+        let response = self
+            .get_public_api_response(&format!("agent/conversations/{conversation_id}/transcript"))
+            .await?;
+        Ok(response.bytes().await?.to_vec())
     }
 
     #[cfg(not(target_family = "wasm"))]

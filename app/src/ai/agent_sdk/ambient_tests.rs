@@ -246,10 +246,18 @@ fn native_conversation() -> serde_json::Value {
 }
 
 #[test]
-fn normalized_conversation_unsupported_matches_rfc7807_type_and_title() {
+fn normalized_conversation_unsupported_matches_rfc7807_type() {
     assert!(is_normalized_conversation_unsupported(
         &operation_not_supported_error()
     ));
+}
+
+#[test]
+fn normalized_conversation_unsupported_matches_type_regardless_of_title() {
+    assert!(is_normalized_conversation_unsupported(&http_error(
+        422,
+        r#"{"type":"https://docs.warp.dev/errors/operation_not_supported","title":"forking is not supported"}"#,
+    )));
 }
 
 #[test]
@@ -276,10 +284,10 @@ fn normalized_conversation_unsupported_rejects_arbitrary_substrings() {
 }
 
 #[test]
-fn normalized_conversation_unsupported_rejects_matching_type_with_different_title() {
+fn normalized_conversation_unsupported_rejects_wrong_problem_type() {
     assert!(!is_normalized_conversation_unsupported(&http_error(
         422,
-        r#"{"type":"https://docs.warp.dev/errors/operation_not_supported","title":"forking is not supported"}"#,
+        r#"{"type":"https://docs.warp.dev/errors/invalid_request","title":"normalized conversations are only supported for Warp-native transcripts"}"#,
     )));
 }
 
@@ -333,7 +341,7 @@ async fn load_run_conversation_returns_normalized_json_for_native_runs() {
             Ok(conversation.clone())
         }
     });
-    mock.expect_download_run_transcript_to_path().times(0);
+    mock.expect_download_run_transcript().times(0);
 
     let output = load_run_conversation(&mock, TASK_ID).await.unwrap();
 
@@ -347,12 +355,11 @@ async fn load_run_conversation_falls_back_to_raw_transcript_for_third_party_harn
     mock.expect_get_run_conversation()
         .times(1)
         .returning(|_| Err(operation_not_supported_error()));
-    mock.expect_download_run_transcript_to_path()
+    mock.expect_download_run_transcript()
         .times(1)
-        .returning(|run_id, path| {
+        .returning(|run_id| {
             assert_eq!(run_id.to_string(), TASK_ID);
-            std::fs::write(path, RAW_TRANSCRIPT).unwrap();
-            Ok(())
+            Ok(RAW_TRANSCRIPT.to_vec())
         });
 
     let output = load_run_conversation(&mock, TASK_ID).await.unwrap();
@@ -369,7 +376,7 @@ async fn load_run_conversation_preserves_unrelated_422() {
     mock.expect_get_run_conversation()
         .times(1)
         .returning(|_| Err(http_error(422, r#"{"error":"validation failed"}"#)));
-    mock.expect_download_run_transcript_to_path().times(0);
+    mock.expect_download_run_transcript().times(0);
 
     let err = load_run_conversation(&mock, TASK_ID).await.unwrap_err();
 
@@ -397,7 +404,7 @@ async fn load_run_conversation_preserves_not_found() {
                 r#"{"type":"https://docs.warp.dev/errors/resource_not_found","title":"conversation not found"}"#,
             ))
         });
-    mock.expect_download_run_transcript_to_path().times(0);
+    mock.expect_download_run_transcript().times(0);
 
     let err = load_run_conversation(&mock, TASK_ID).await.unwrap_err();
 
@@ -413,9 +420,9 @@ async fn load_run_conversation_reports_missing_raw_transcript() {
     mock.expect_get_run_conversation()
         .times(1)
         .returning(|_| Err(operation_not_supported_error()));
-    mock.expect_download_run_transcript_to_path()
+    mock.expect_download_run_transcript()
         .times(1)
-        .returning(|_, _| {
+        .returning(|_| {
             Err(http_error(
                 404,
                 r#"{"type":"https://docs.warp.dev/errors/resource_not_found","title":"no transcript path in manifest"}"#,
@@ -441,8 +448,7 @@ async fn load_public_conversation_returns_normalized_json() {
             Ok(conversation.clone())
         }
     });
-    mock.expect_download_conversation_transcript_to_path()
-        .times(0);
+    mock.expect_download_conversation_transcript().times(0);
 
     let output = load_public_conversation(&mock, "conv-native")
         .await
@@ -458,12 +464,11 @@ async fn load_public_conversation_falls_back_to_raw_transcript_for_third_party_h
     mock.expect_get_public_conversation()
         .times(1)
         .returning(|_| Err(operation_not_supported_error()));
-    mock.expect_download_conversation_transcript_to_path()
+    mock.expect_download_conversation_transcript()
         .times(1)
-        .returning(|conversation_id, path| {
+        .returning(|conversation_id| {
             assert_eq!(conversation_id, "conv-third-party");
-            std::fs::write(path, RAW_TRANSCRIPT).unwrap();
-            Ok(())
+            Ok(RAW_TRANSCRIPT.to_vec())
         });
 
     let output = load_public_conversation(&mock, "conv-third-party")
@@ -482,8 +487,7 @@ async fn load_public_conversation_preserves_unrelated_422() {
     mock.expect_get_public_conversation()
         .times(1)
         .returning(|_| Err(http_error(422, r#"{"error":"validation failed"}"#)));
-    mock.expect_download_conversation_transcript_to_path()
-        .times(0);
+    mock.expect_download_conversation_transcript().times(0);
 
     let err = load_public_conversation(&mock, "conv-third-party")
         .await
@@ -501,9 +505,9 @@ async fn load_public_conversation_reports_missing_raw_transcript() {
     mock.expect_get_public_conversation()
         .times(1)
         .returning(|_| Err(operation_not_supported_error()));
-    mock.expect_download_conversation_transcript_to_path()
+    mock.expect_download_conversation_transcript()
         .times(1)
-        .returning(|_, _| {
+        .returning(|_| {
             Err(http_error(
                 404,
                 r#"{"type":"https://docs.warp.dev/errors/resource_not_found","title":"no transcript path in manifest"}"#,

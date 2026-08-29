@@ -56,8 +56,6 @@ const HTTP_UNPROCESSABLE_ENTITY: u16 = 422;
 const HTTP_NOT_FOUND: u16 = 404;
 const OPERATION_NOT_SUPPORTED_TYPE_URI: &str =
     "https://docs.warp.dev/errors/operation_not_supported";
-const NORMALIZED_CONVERSATION_UNSUPPORTED_TITLE: &str =
-    "normalized conversations are only supported for Warp-native transcripts";
 
 /// Singleton model that runs async work for ambient agent CLI commands.
 struct AmbientAgentRunner;
@@ -1482,19 +1480,11 @@ async fn download_raw_run_transcript(
     run_id: &str,
 ) -> anyhow::Result<Vec<u8>> {
     let task_id = parse_ambient_task_id(run_id, "Invalid run ID")?;
-    let transcript_file = tempfile::Builder::new()
-        .prefix("warp_run_transcript_")
-        .suffix(".json")
-        .tempfile()
-        .context("Failed to create temporary transcript file")?;
-    let transcript_path = transcript_file.path().to_path_buf();
-    download_raw_transcript(
-        ai_client.download_run_transcript_to_path(&task_id, &transcript_path),
-        &transcript_path,
+    map_raw_transcript_download(
+        ai_client.download_run_transcript(&task_id).await,
         format!("Raw transcript not found for run {run_id}. It may not have been uploaded yet."),
         format!("Failed to download raw transcript for run {run_id}"),
     )
-    .await
 }
 
 #[cfg(not(target_family = "wasm"))]
@@ -1502,50 +1492,34 @@ async fn download_raw_conversation_transcript(
     ai_client: &dyn AIClient,
     conversation_id: &str,
 ) -> anyhow::Result<Vec<u8>> {
-    let transcript_file = tempfile::Builder::new()
-        .prefix("warp_conversation_transcript_")
-        .suffix(".json")
-        .tempfile()
-        .context("Failed to create temporary transcript file")?;
-    let transcript_path = transcript_file.path().to_path_buf();
-    download_raw_transcript(
-        ai_client.download_conversation_transcript_to_path(conversation_id, &transcript_path),
-        &transcript_path,
+    map_raw_transcript_download(
+        ai_client
+            .download_conversation_transcript(conversation_id)
+            .await,
         format!(
             "Raw transcript not found for conversation {conversation_id}. It may not have been uploaded yet."
         ),
         format!("Failed to download raw transcript for conversation {conversation_id}"),
     )
-    .await
 }
 
 #[cfg(not(target_family = "wasm"))]
-async fn download_raw_transcript(
-    download: impl std::future::Future<Output = anyhow::Result<()>>,
-    destination: &std::path::Path,
+fn map_raw_transcript_download(
+    result: anyhow::Result<Vec<u8>>,
     not_found_message: String,
     failure_context: String,
 ) -> anyhow::Result<Vec<u8>> {
-    if let Err(err) = download.await {
-        if is_http_status(&err, HTTP_NOT_FOUND) {
-            return Err(anyhow!(not_found_message));
-        }
-        return Err(err.context(failure_context));
+    match result {
+        Ok(bytes) => Ok(bytes),
+        Err(err) if is_http_status(&err, HTTP_NOT_FOUND) => Err(anyhow!(not_found_message)),
+        Err(err) => Err(err.context(failure_context)),
     }
-    std::fs::read(destination).with_context(|| {
-        format!(
-            "Failed to read downloaded transcript '{}'",
-            destination.display()
-        )
-    })
 }
 
 #[derive(Deserialize)]
 struct Rfc7807Problem {
     #[serde(default, rename = "type")]
     problem_type: String,
-    #[serde(default)]
-    title: String,
 }
 
 fn is_normalized_conversation_unsupported(err: &anyhow::Error) -> bool {
@@ -1560,7 +1534,6 @@ fn is_normalized_conversation_unsupported(err: &anyhow::Error) -> bool {
             return false;
         };
         problem.problem_type == OPERATION_NOT_SUPPORTED_TYPE_URI
-            && problem.title == NORMALIZED_CONVERSATION_UNSUPPORTED_TITLE
     })
 }
 
