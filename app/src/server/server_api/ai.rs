@@ -10,6 +10,8 @@ use ai::index::full_source_code_embedding::{
 use anyhow::anyhow;
 use async_trait::async_trait;
 use base64::Engine;
+#[cfg(not(target_family = "wasm"))]
+use bytes::Bytes;
 use chrono::{DateTime, Utc};
 use cloud_object_models::CodeForge;
 use cynic::{MutationBuilder, QueryBuilder};
@@ -1309,7 +1311,7 @@ pub trait AIClient: 'static + Send + Sync {
     async fn download_run_transcript(
         &self,
         run_id: &AmbientAgentTaskId,
-    ) -> anyhow::Result<Vec<u8>, anyhow::Error>;
+    ) -> anyhow::Result<Bytes, anyhow::Error>;
 
     #[cfg(not(target_family = "wasm"))]
     async fn download_run_transcript_to_path(
@@ -1322,7 +1324,7 @@ pub trait AIClient: 'static + Send + Sync {
     async fn download_conversation_transcript(
         &self,
         conversation_id: &str,
-    ) -> anyhow::Result<Vec<u8>, anyhow::Error>;
+    ) -> anyhow::Result<Bytes, anyhow::Error>;
 
     #[cfg(not(target_family = "wasm"))]
     async fn download_conversation_transcript_to_path(
@@ -2911,11 +2913,11 @@ impl AIClient for ServerApi {
     async fn download_run_transcript(
         &self,
         run_id: &AmbientAgentTaskId,
-    ) -> anyhow::Result<Vec<u8>, anyhow::Error> {
+    ) -> anyhow::Result<Bytes, anyhow::Error> {
         let response = self
             .get_public_api_response(&format!("agent/runs/{run_id}/transcript"))
             .await?;
-        Ok(response.bytes().await?.to_vec())
+        Ok(response.bytes().await?)
     }
 
     #[cfg(not(target_family = "wasm"))]
@@ -2934,11 +2936,11 @@ impl AIClient for ServerApi {
     async fn download_conversation_transcript(
         &self,
         conversation_id: &str,
-    ) -> anyhow::Result<Vec<u8>, anyhow::Error> {
+    ) -> anyhow::Result<Bytes, anyhow::Error> {
         let response = self
             .get_public_api_response(&format!("agent/conversations/{conversation_id}/transcript"))
             .await?;
-        Ok(response.bytes().await?.to_vec())
+        Ok(response.bytes().await?)
     }
 
     #[cfg(not(target_family = "wasm"))]

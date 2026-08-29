@@ -1,4 +1,5 @@
 //! Unit tests for ambient agent CLI argument mapping and message helpers.
+use bytes::Bytes;
 use chrono::{TimeZone, Utc};
 use warp_cli::SortOrderArg;
 use warp_cli::json_filter::JsonOutput;
@@ -315,7 +316,7 @@ fn write_conversation_cli_output_pretty_prints_normalized_json() {
 fn write_conversation_cli_output_writes_raw_transcript_bytes_exactly() {
     let mut without_newline = Vec::new();
     write_conversation_cli_output(
-        &ConversationCliOutput::RawTranscript(b"no trailing newline".to_vec()),
+        &ConversationCliOutput::RawTranscript(Bytes::from_static(b"no trailing newline")),
         &mut without_newline,
     )
     .unwrap();
@@ -323,7 +324,7 @@ fn write_conversation_cli_output_writes_raw_transcript_bytes_exactly() {
 
     let mut non_utf8 = Vec::new();
     write_conversation_cli_output(
-        &ConversationCliOutput::RawTranscript(vec![0xff, 0xfe, 0x00, b'x']),
+        &ConversationCliOutput::RawTranscript(Bytes::from_static(&[0xff, 0xfe, 0x00, b'x'])),
         &mut non_utf8,
     )
     .unwrap();
@@ -359,14 +360,14 @@ async fn load_run_conversation_falls_back_to_raw_transcript_for_third_party_harn
         .times(1)
         .returning(|run_id| {
             assert_eq!(run_id.to_string(), TASK_ID);
-            Ok(RAW_TRANSCRIPT.to_vec())
+            Ok(Bytes::from_static(RAW_TRANSCRIPT))
         });
 
     let output = load_run_conversation(&mock, TASK_ID).await.unwrap();
 
     assert_eq!(
         output,
-        ConversationCliOutput::RawTranscript(RAW_TRANSCRIPT.to_vec())
+        ConversationCliOutput::RawTranscript(Bytes::from_static(RAW_TRANSCRIPT))
     );
 }
 
@@ -468,7 +469,7 @@ async fn load_public_conversation_falls_back_to_raw_transcript_for_third_party_h
         .times(1)
         .returning(|conversation_id| {
             assert_eq!(conversation_id, "conv-third-party");
-            Ok(RAW_TRANSCRIPT.to_vec())
+            Ok(Bytes::from_static(RAW_TRANSCRIPT))
         });
 
     let output = load_public_conversation(&mock, "conv-third-party")
@@ -477,7 +478,7 @@ async fn load_public_conversation_falls_back_to_raw_transcript_for_third_party_h
 
     assert_eq!(
         output,
-        ConversationCliOutput::RawTranscript(RAW_TRANSCRIPT.to_vec())
+        ConversationCliOutput::RawTranscript(Bytes::from_static(RAW_TRANSCRIPT))
     );
 }
 

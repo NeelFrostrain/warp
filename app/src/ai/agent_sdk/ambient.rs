@@ -4,6 +4,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context as _, anyhow};
+use bytes::Bytes;
 use comfy_table::Cell;
 use futures::{StreamExt, future};
 use serde::{Deserialize, Serialize};
@@ -1435,7 +1436,7 @@ pub fn get_run_conversation(ctx: &mut AppContext, run_id: String) -> anyhow::Res
 #[derive(Debug, PartialEq)]
 enum ConversationCliOutput {
     Normalized(serde_json::Value),
-    RawTranscript(Vec<u8>),
+    RawTranscript(Bytes),
 }
 
 async fn load_run_conversation(
@@ -1478,7 +1479,7 @@ async fn load_public_conversation(
 async fn download_raw_run_transcript(
     ai_client: &dyn AIClient,
     run_id: &str,
-) -> anyhow::Result<Vec<u8>> {
+) -> anyhow::Result<Bytes> {
     let task_id = parse_ambient_task_id(run_id, "Invalid run ID")?;
     map_raw_transcript_download(
         ai_client.download_run_transcript(&task_id).await,
@@ -1491,7 +1492,7 @@ async fn download_raw_run_transcript(
 async fn download_raw_conversation_transcript(
     ai_client: &dyn AIClient,
     conversation_id: &str,
-) -> anyhow::Result<Vec<u8>> {
+) -> anyhow::Result<Bytes> {
     map_raw_transcript_download(
         ai_client
             .download_conversation_transcript(conversation_id)
@@ -1505,10 +1506,10 @@ async fn download_raw_conversation_transcript(
 
 #[cfg(not(target_family = "wasm"))]
 fn map_raw_transcript_download(
-    result: anyhow::Result<Vec<u8>>,
+    result: anyhow::Result<Bytes>,
     not_found_message: String,
     failure_context: String,
-) -> anyhow::Result<Vec<u8>> {
+) -> anyhow::Result<Bytes> {
     match result {
         Ok(bytes) => Ok(bytes),
         Err(err) if is_http_status(&err, HTTP_NOT_FOUND) => Err(anyhow!(not_found_message)),
@@ -1563,7 +1564,7 @@ where
             writeln!(writer, "{pretty}")?;
         }
         ConversationCliOutput::RawTranscript(bytes) => {
-            writer.write_all(bytes)?;
+            writer.write_all(bytes.as_ref())?;
         }
     }
     Ok(())
